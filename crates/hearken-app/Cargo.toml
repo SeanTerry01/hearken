@@ -23,7 +23,7 @@ agent-server = []
 # `ctx.online`: verified runs sent to the game's server (see `online`),
 # connecting an account from Settings, and `ctx.rooms`: online play between
 # players (see `hearken-rooms` and `screens::rooms`). HTTPS through ureq.
-online = ["dep:ureq", "dep:hearken-replay", "dep:hearken-rooms"]
+online = ["dep:ureq", "dep:hearken-replay", "dep:hearken-rooms", "dep:sha2"]
 # Discord Rich Presence for a game that gives `Game::discord` an application
 # ID: the real client over Discord's local pipe. Without it the hooks still
 # compile and nothing reaches Discord.
@@ -57,6 +57,8 @@ tempfile = { workspace = true, optional = true }
 ureq = { workspace = true, optional = true }
 hearken-replay = { workspace = true, optional = true }
 hearken-rooms = { workspace = true, optional = true }
+# Synced files' checksums (`sync`).
+sha2 = { version = "0.11", default-features = false, optional = true }
 hearken-update = { workspace = true, optional = true }
 hearken-report = { workspace = true, optional = true }
 # Soundtrack exports as Ogg Vorbis (libvorbis, built from source; BSD).

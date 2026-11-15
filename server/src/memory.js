@@ -186,6 +186,10 @@ export function memoryAccounts({
       row.player = { id: `p${nextId++}`, name: String(name).slice(0, 32) || "Player" };
       return true;
     },
+    /** Another token for a player, as a second computer gets, for tests. */
+    async tokenForPlayer(player) {
+      return issue(player);
+    },
     /** A token for a new player, for tests. */
     async tokenFor(name) {
       return issue({ id: `p${nextId++}`, name });
