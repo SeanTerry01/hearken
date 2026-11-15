@@ -164,6 +164,23 @@ fn test_narrator_route_used_when_nothing_else_can_speak() {
 }
 
 #[test]
+fn test_clipboard_is_never_chosen_automatically() {
+    // Prism's Clipboard backend registers at priority 0 ahead of No Speech
+    // and is usable wherever there is a clipboard. Chosen, it would copy
+    // every line over the player's clipboard and say nothing.
+    let ctx = FakeRegistry::new(vec![
+        FakeVoice::new("Speech Dispatcher", 97, runtime(false)),
+        FakeVoice::new("Clipboard", 0, SPEAKING),
+        FakeVoice::new("No Speech", 0, SPEAKING),
+    ]);
+    assert_eq!(picked_name(&ctx, None).as_deref(), Some("No Speech"));
+    assert_eq!(
+        picked_name(&ctx, Some("Clipboard")).as_deref(),
+        Some("Clipboard")
+    );
+}
+
+#[test]
 fn test_running_screen_reader_beats_narrator() {
     // NVDA and Narrator both up: the richer screen reader API wins.
     let picked = pick_backend_gated(&narrator_registry(true), None, narrator_on);

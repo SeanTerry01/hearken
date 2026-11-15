@@ -490,6 +490,9 @@ pub fn narrator_running() -> bool {
     false
 }
 
+/// Prism's registry name for its clipboard backend.
+const CLIPBOARD_BACKEND: &str = "Clipboard";
+
 fn name_of(ctx: &dyn VoiceRegistry, id: BackendId) -> String {
     ctx.name_of(id).unwrap_or_else(|| id.to_string())
 }
@@ -505,6 +508,10 @@ fn name_of(ctx: &dyn VoiceRegistry, id: BackendId) -> String {
 /// check. The `UIA` backend (Narrator's route) claims runtime support
 /// unconditionally, so it is skipped unless Narrator is actually running,
 /// and even then ranked last (see [`super::UIA_LAST_RESORT_PRIORITY`]).
+/// Prism's `Clipboard` backend (0.1.6 on) copies each line to the system
+/// clipboard: it speaks nothing, ties `No Speech` at priority 0 ahead of it
+/// in registry order, and would overwrite whatever the player copied, so it
+/// is never chosen automatically; naming it as the override still works.
 /// Returns `None` when nothing on the machine can speak.
 pub fn pick_backend(
     ctx: &dyn VoiceRegistry,
@@ -551,6 +558,9 @@ pub fn pick_backend_gated(
             continue;
         };
         let name = name_of(ctx, backend_id);
+        if name == CLIPBOARD_BACKEND {
+            continue;
+        }
         let priority = if name == "UIA" {
             if !narrator {
                 continue;
