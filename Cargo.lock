@@ -1200,6 +1200,7 @@ dependencies = [
  "sdl2",
  "serde",
  "serde_json",
+ "sha2 0.11.1",
  "tar",
  "tempfile",
  "ureq 2.12.1",
