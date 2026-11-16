@@ -116,7 +116,7 @@ impl Computer {
                     self.bases
                         .push(base.map(|b| serde_json::from_slice(&b).unwrap()));
                     let changed = merge(&mut self.save, &cloud);
-                    self.sync.merged(changed);
+                    self.sync.merged(&mut self.vault, changed);
                     quiet = 0;
                 }
                 None if *self.sync.state() == before && self.sync.ticket.is_none() => {

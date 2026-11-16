@@ -9,9 +9,9 @@
 //! together) and hands the result back. So nothing here knows what a save
 //! holds.
 //!
-//! Beside the account's copy comes the base: the last copy this computer
-//! and the account agreed on, kept sealed in the vault as
-//! `sync-<name>-base`. With it a game can merge three ways, so a count
+//! Beside the account's copy comes the base: the last of the account's
+//! copies this computer's file took in or sent up, kept sealed in the vault
+//! as `sync-<name>-base`. With it a game can merge three ways, so a count
 //! played up on both computers keeps both sides' plays. It is `None` the
 //! first time a computer meets an account.
 //!
@@ -209,6 +209,9 @@ struct Notes {
     /// The plain file's hash at that revision.
     #[serde(default)]
     hash: String,
+    /// The account the kept base belongs to.
+    #[serde(default)]
+    base: Option<String>,
 }
 
 fn yes() -> bool {
@@ -521,9 +524,14 @@ impl FileSync {
     /// The game's answer to [`Need::Merge`]: whether the merge changed this
     /// computer's file. The sync then asks for an export, to send the
     /// merged file up unless it came out the same as the account's.
-    pub fn merged(&mut self, changed: bool) {
+    pub fn merged(&mut self, vault: &mut Vault, changed: bool) {
         if self.state != SyncState::Merging {
             return;
+        }
+        // This computer's file now holds the account's copy, so that copy is
+        // where the next merge starts from, even if the upload never goes.
+        if let Some(plain) = self.cloud.as_ref().map(|(plain, _, _)| plain.clone()) {
+            self.save_base(vault, &plain);
         }
         if changed {
             self.events.push(SyncEvent::Added);
@@ -769,24 +777,27 @@ impl FileSync {
     /// The last copy both sides agreed on: only when it is the one the
     /// notes name, for the account this computer last synced with.
     fn read_base(&mut self, vault: &mut Vault) -> Option<Vec<u8>> {
-        let notes = self.notes(vault).clone();
         let account = self.head.as_ref().map(|h| h.account.clone());
-        if notes.hash.is_empty() || notes.account.is_none() || notes.account != account {
+        if account.is_none() || self.notes(vault).base != account {
             return None;
         }
         match vault.read(&self.config.base()) {
-            Opened::Sealed(bytes) | Opened::Plain(bytes) if sha256_hex(&bytes) == notes.hash => {
-                Some(bytes)
-            }
+            Opened::Sealed(bytes) | Opened::Plain(bytes) => Some(bytes),
             _ => None,
         }
     }
 
+    /// Keeps `plain` as the base: a copy the account holds and this
+    /// computer's file now includes.
     fn save_base(&mut self, vault: &mut Vault, plain: &[u8]) {
         let name = self.config.base();
         if let Err(e) = vault.write(&name, plain) {
             log::warn!("[sync] could not save {name}: {e}");
+            return;
         }
+        let mut notes = self.notes(vault).clone();
+        notes.base = self.head.as_ref().map(|h| h.account.clone());
+        self.save_notes(vault, notes);
     }
 
     fn save_notes(&mut self, vault: &mut Vault, notes: Notes) {
