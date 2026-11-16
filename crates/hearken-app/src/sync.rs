@@ -9,6 +9,12 @@
 //! together) and hands the result back. So nothing here knows what a save
 //! holds.
 //!
+//! Beside the account's copy comes the base: the last copy this computer
+//! and the account agreed on, kept sealed in the vault as
+//! `sync-<name>-base`. With it a game can merge three ways, so a count
+//! played up on both computers keeps both sides' plays. It is `None` the
+//! first time a computer meets an account.
+//!
 //! What goes up is sealed with the vault's key ([`Vault::seal_bytes`]), so
 //! the server never reads it, and what comes down must open with it
 //! ([`Vault::open_bytes`]): a copy is trusted exactly as the file on disk
@@ -69,6 +75,10 @@ impl SyncConfig {
     /// The vault file the sync keeps its own notes in.
     fn notes(&self) -> String {
         format!("sync-{}.json", self.name)
+    }
+
+    fn base(&self) -> String {
+        format!("sync-{}-base", self.name)
     }
 }
 
@@ -149,9 +159,13 @@ impl SyncState {
 pub enum Need {
     /// The file's plain bytes now, through [`FileSync::exported`].
     Export,
-    /// The account's copy, plain, to merge into the game's own; answer
+    /// The account's copy, plain, to merge into the game's own, and the
+    /// last copy both sides agreed on, when this computer has one; answer
     /// with [`FileSync::merged`].
-    Merge(Vec<u8>),
+    Merge {
+        theirs: Vec<u8>,
+        base: Option<Vec<u8>>,
+    },
 }
 
 /// Something the player may want to hear about, from
@@ -160,6 +174,10 @@ pub enum Need {
 pub enum SyncEvent {
     /// The account's first copy went up, from this computer.
     FirstSaved,
+    /// The server no longer knows the account, so it was disconnected and
+    /// syncing stopped (`OnlineError::SignedOut` says what to tell the
+    /// player).
+    SignedOut,
     /// The account's copy brought something this computer did not have.
     Added,
     /// The sync stopped at [`SyncState::NeedsChoice`].
@@ -228,8 +246,8 @@ pub struct FileSync {
     then: Then,
     /// The account's copy waiting to be merged, its revision and its plain hash.
     cloud: Option<(Vec<u8>, u64, String)>,
-    /// The bytes and hash being uploaded, and the revision they would be.
-    sending: Option<String>,
+    /// The hash and plain bytes being uploaded.
+    sending: Option<(String, Vec<u8>)>,
     /// The game said the file may have changed.
     dirty: bool,
     /// When the next upload may go, and the next look at the account.
@@ -329,9 +347,15 @@ impl FileSync {
         now: f64,
         safe: bool,
     ) -> Option<Need> {
-        if self.ticket.is_some() && self.generation != Some(online.account_generation()) {
-            // The account changed under a request: its answer is for the old one.
-            self.ticket = None;
+        if let Some(ticket) = self.ticket {
+            if self.generation != Some(online.account_generation()) {
+                // The account changed under a request: its answer is for the
+                // old one. When the answer is what disconnected it, say so.
+                if let Some(Err(OnlineError::SignedOut)) = online.result(ticket) {
+                    self.events.push(SyncEvent::SignedOut);
+                }
+                self.ticket = None;
+            }
         }
         if self.generation != Some(online.account_generation()) {
             self.generation = Some(online.account_generation());
@@ -382,7 +406,9 @@ impl FileSync {
             }
             SyncState::Merging if safe => {
                 if let Some((plain, _, _)) = &self.cloud {
-                    return Some(Need::Merge(plain.clone()));
+                    let theirs = plain.clone();
+                    let base = self.read_base(vault);
+                    return Some(Need::Merge { theirs, base });
                 }
                 self.go(SyncState::Starting);
             }
@@ -421,9 +447,10 @@ impl FileSync {
                 };
                 let met = notes.account.as_deref() == Some(head.account.as_str());
                 match head.save {
-                    None if !met && !has_progress => {
+                    None if !has_progress => {
                         // Nothing on either side yet: nothing to send until
-                        // there is.
+                        // there is, so the account's first copy holds
+                        // progress.
                         let mut notes = notes;
                         notes.account = Some(head.account);
                         notes.revision = 0;
@@ -458,7 +485,10 @@ impl FileSync {
             }
             Then::UploadIfChanged => {
                 self.dirty = false;
-                if hash == notes.hash && account == notes.account {
+                let account_empty = head.as_ref().is_some_and(|h| h.save.is_none());
+                if (hash == notes.hash && account == notes.account)
+                    || (account_empty && !has_progress)
+                {
                     self.go(SyncState::UpToDate);
                 } else {
                     let base = notes.revision;
@@ -472,6 +502,7 @@ impl FileSync {
                 };
                 let meeting = std::mem::take(&mut self.meeting);
                 if hash == cloud_hash {
+                    self.save_base(vault, plain);
                     let mut notes = notes;
                     notes.account = account;
                     notes.revision = revision;
@@ -509,6 +540,7 @@ impl FileSync {
         online: &mut Online,
         vault: &mut Vault,
         plain: &[u8],
+        has_progress: bool,
         card: Option<Value>,
         timeout: std::time::Duration,
     ) {
@@ -522,7 +554,7 @@ impl FileSync {
         }
         self.go(SyncState::Exporting);
         self.then = Then::UploadIfChanged;
-        self.exported(online, vault, plain, true, card, f64::MAX);
+        self.exported(online, vault, plain, has_progress, card, f64::MAX);
         if let Some(ticket) = self.ticket.take() {
             if let Some(answer) = online.wait(ticket, timeout) {
                 self.answered(vault, answer, f64::MAX);
@@ -552,7 +584,7 @@ impl FileSync {
         match online.save_upload(&self.config.name, base, self.config.format, &sealed, card) {
             Ok(ticket) => {
                 self.ticket = Some(ticket);
-                self.sending = Some(hash);
+                self.sending = Some((hash, plain.to_vec()));
                 self.next_upload = now + self.config.gap;
                 self.go(SyncState::Uploading);
             }
@@ -653,7 +685,8 @@ impl FileSync {
                 }
             }
             SyncState::Uploading => {
-                let (Some(revision), Some(hash)) = (body["revision"].as_u64(), self.sending.take())
+                let (Some(revision), Some((hash, plain))) =
+                    (body["revision"].as_u64(), self.sending.take())
                 else {
                     self.failed(&OnlineError::Unavailable, now);
                     return;
@@ -664,6 +697,7 @@ impl FileSync {
                 notes.revision = revision;
                 notes.hash = hash;
                 self.save_notes(vault, notes);
+                self.save_base(vault, &plain);
                 if let Some(head) = &mut self.head {
                     head.save = Some((revision, self.config.format));
                 }
@@ -686,7 +720,11 @@ impl FileSync {
         self.ticket = None;
         self.sending = None;
         let state = match error {
-            OnlineError::NotConnected | OnlineError::SignedOut => SyncState::NeedsAccount,
+            OnlineError::NotConnected => SyncState::NeedsAccount,
+            OnlineError::SignedOut => {
+                self.events.push(SyncEvent::SignedOut);
+                SyncState::NeedsAccount
+            }
             OnlineError::Refused { code, .. } if code == "account-needed" => {
                 SyncState::NeedsAccount
             }
@@ -726,6 +764,29 @@ impl FileSync {
             self.notes = Some(notes);
         }
         self.notes.as_ref().expect("just read")
+    }
+
+    /// The last copy both sides agreed on: only when it is the one the
+    /// notes name, for the account this computer last synced with.
+    fn read_base(&mut self, vault: &mut Vault) -> Option<Vec<u8>> {
+        let notes = self.notes(vault).clone();
+        let account = self.head.as_ref().map(|h| h.account.clone());
+        if notes.hash.is_empty() || notes.account.is_none() || notes.account != account {
+            return None;
+        }
+        match vault.read(&self.config.base()) {
+            Opened::Sealed(bytes) | Opened::Plain(bytes) if sha256_hex(&bytes) == notes.hash => {
+                Some(bytes)
+            }
+            _ => None,
+        }
+    }
+
+    fn save_base(&mut self, vault: &mut Vault, plain: &[u8]) {
+        let name = self.config.base();
+        if let Err(e) = vault.write(&name, plain) {
+            log::warn!("[sync] could not save {name}: {e}");
+        }
     }
 
     fn save_notes(&mut self, vault: &mut Vault, notes: Notes) {

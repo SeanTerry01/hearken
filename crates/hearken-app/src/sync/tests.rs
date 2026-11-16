@@ -20,6 +20,8 @@ struct Computer {
     sync: FileSync,
     now: f64,
     events: Vec<SyncEvent>,
+    /// The base each merge came with.
+    bases: Vec<Option<Value>>,
 }
 
 fn settings(token: &str) -> OnlineSettings {
@@ -44,6 +46,7 @@ fn computer(server: &Arc<FakeSaves>, key: &Key, token: Option<&str>) -> Computer
         sync: FileSync::new(SyncConfig::new("records", "records.json", 1)),
         now: 0.0,
         events: Vec::new(),
+        bases: Vec::new(),
     }
 }
 
@@ -108,8 +111,10 @@ impl Computer {
                     );
                     quiet = 0;
                 }
-                Some(Need::Merge(plain)) => {
-                    let cloud: Value = serde_json::from_slice(&plain).unwrap();
+                Some(Need::Merge { theirs, base }) => {
+                    let cloud: Value = serde_json::from_slice(&theirs).unwrap();
+                    self.bases
+                        .push(base.map(|b| serde_json::from_slice(&b).unwrap()));
                     let changed = merge(&mut self.save, &cloud);
                     self.sync.merged(changed);
                     quiet = 0;
@@ -203,6 +208,35 @@ fn two_computers_that_played_apart_end_with_both() {
 }
 
 #[test]
+fn a_merge_comes_with_the_copy_both_sides_last_agreed_on() {
+    let (server, key) = setup();
+    let mut one = computer(&server, &key, Some(ONE));
+    one.play(40, "diary-1");
+    one.settle();
+    let mut two = computer(&server, &key, Some(TWO));
+    two.settle();
+    // Meeting the account, two has nothing in common with it yet.
+    assert_eq!(two.bases, vec![None]);
+
+    one.play(55, "");
+    two.play(10, "diary-2");
+    one.later(31.0);
+    two.later(31.0);
+    one.settle();
+    two.settle();
+    // Two's stale upload brings one's copy, with the copy both last had.
+    let agreed = json!({"best": 40, "unlocks": ["diary-1"]});
+    assert_eq!(two.bases.last(), Some(&Some(agreed)));
+    // One's next merge starts from what two sent up.
+    one.later(601.0);
+    one.settle();
+    assert_eq!(
+        one.bases.last(),
+        Some(&Some(json!({"best": 55, "unlocks": ["diary-1"]})))
+    );
+}
+
+#[test]
 fn a_computer_with_its_own_progress_asks_before_combining() {
     let (server, key) = setup();
     let mut one = computer(&server, &key, Some(ONE));
@@ -291,6 +325,34 @@ fn guests_and_signed_out_players_do_not_sync() {
 }
 
 #[test]
+fn a_token_the_server_forgot_signs_out_and_says_so() {
+    let (server, key) = setup();
+    let mut one = computer(&server, &key, Some("token-nobody-knows-00000"));
+    assert_eq!(one.settle(), "needs-account");
+    assert_eq!(one.events, vec![SyncEvent::SignedOut]);
+    assert!(!one.online.is_connected());
+}
+
+#[test]
+fn nothing_goes_up_until_there_is_progress() {
+    let (server, key) = setup();
+    let mut one = computer(&server, &key, Some(ONE));
+    assert_eq!(one.settle(), "up-to-date");
+    // A file that changed but holds no progress yet.
+    one.save["seen"] = json!(true);
+    one.sync.touch();
+    one.later(31.0);
+    assert_eq!(one.settle(), "up-to-date");
+    assert!(server.kept("ada", "records").is_empty());
+    assert!(one.events.is_empty());
+    one.play(5, "");
+    one.later(31.0);
+    one.settle();
+    assert_eq!(server.kept("ada", "records").len(), 1);
+    assert_eq!(one.events, vec![SyncEvent::FirstSaved]);
+}
+
+#[test]
 fn offline_waits_and_tries_again() {
     let (server, key) = setup();
     let mut one = computer(&server, &key, Some(ONE));
@@ -353,7 +415,7 @@ fn no_merge_until_the_game_says_it_is_safe() {
     );
     assert!(matches!(
         two.sync.step(&mut two.online, &mut two.vault, 0.0, true),
-        Some(Need::Merge(_))
+        Some(Need::Merge { .. })
     ));
 }
 
@@ -372,6 +434,7 @@ fn flush_sends_the_last_change_as_the_game_closes() {
         &mut one.online,
         &mut one.vault,
         &bytes,
+        true,
         None,
         Duration::from_secs(2),
     );

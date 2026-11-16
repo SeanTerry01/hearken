@@ -262,6 +262,14 @@ pub enum OnlineError {
     CodeExpired,
 }
 
+/// "a" or "an" before a site's name: "an orinks.net account".
+pub fn article(site: &str) -> &'static str {
+    match site.chars().next().map(|c| c.to_ascii_lowercase()) {
+        Some('a' | 'e' | 'i' | 'o' | 'u') => "an",
+        _ => "a",
+    }
+}
+
 impl OnlineError {
     /// A short stable name, for logs and a game's own matching.
     pub fn code(&self) -> &str {
