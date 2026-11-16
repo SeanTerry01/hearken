@@ -54,6 +54,9 @@ pub const LANGUAGES: &[(&str, &str, &str)] = &[
     ("tr", "Turkish", "nplurals=2; plural=(n != 1);"),
 ];
 
+/// A hole and a space opening a sentence: "{status} Build a row ...".
+static LEADING_SENTENCES_HOLE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^\{[A-Za-z_][A-Za-z0-9_]*\} ").expect("fixed pattern"));
 static PLACEHOLDER: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\{[A-Za-z_][A-Za-z0-9_]*\}").expect("fixed pattern"));
 
@@ -207,12 +210,24 @@ fn template_entries(project: &Project) -> Result<Vec<Entry>> {
     // template with placeholders is a template too: the game translates
     // sentence by sentence when the whole line does not match.
     for template in catalog.entries.clone() {
-        let sentences: Vec<String> = split_sentences(&template.msgid)
+        let mut sentences: Vec<String> = split_sentences(&template.msgid)
             .into_iter()
             .map(str::to_string)
             .collect();
         if sentences.len() < 2 || !PLACEHOLDER.is_match(&template.msgid) {
             continue;
+        }
+        // "{status} Build a row of {places} bells." opens with a hole that
+        // holds whole sentences of its own: help read as pages reaches the
+        // player one sentence at a time, so the sentence after it is a
+        // template too.
+        if let Some(rest) = LEADING_SENTENCES_HOLE
+            .find(&sentences[0])
+            .map(|found| sentences[0][found.end()..].to_string())
+        {
+            if rest.chars().next().is_some_and(|c| c.is_ascii_uppercase()) {
+                sentences.push(rest);
+            }
         }
         add_pieces(
             &mut catalog,

@@ -116,6 +116,9 @@ pub struct Ctx<G: Game> {
     hold_interrupt: bool,
     /// Whether this run has said `language::ENGLISH_ONLY_VOICE`.
     pub(crate) told_english_only: bool,
+    /// What the voice could speak when the language was last loaded: when
+    /// the voice behind it changes, the language follows.
+    pub(crate) language_fit: Option<crate::language::VoiceFit>,
 }
 
 impl<G: Game> Ctx<G> {
@@ -191,6 +194,7 @@ impl<G: Game> Ctx<G> {
             commentary: None,
             hold_interrupt: false,
             told_english_only: false,
+            language_fit: None,
         };
         // So saved bus volumes are in effect from the very first frame, not
         // just once the real backend has finished opening.

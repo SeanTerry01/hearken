@@ -409,6 +409,27 @@ impl Catalog {
         })
     }
 
+    /// A short word or phrase the catalog has as an entry of its own
+    /// ("spades", "jack"): safe to fill a generic template's hole.
+    fn knows_word(&self, value: &str) -> bool {
+        let value = value.trim();
+        if value.is_empty() || value.contains(['.', ':', ';', ',']) {
+            return false;
+        }
+        if self.exact.contains_key(value) {
+            return true;
+        }
+        let mut chars = value.chars();
+        chars.next().is_some_and(|first| {
+            let flipped: String = if first.is_uppercase() {
+                first.to_lowercase().chain(chars).collect()
+            } else {
+                first.to_uppercase().chain(chars).collect()
+            };
+            self.exact.contains_key(&flipped)
+        })
+    }
+
     pub fn language(&self) -> &str {
         &self.language
     }
@@ -507,8 +528,32 @@ impl Translator {
         }
         let mut missed = Vec::new();
         let mut memo = Memo::new();
-        let out = match split_position_cue(line) {
-            Some((row, position, count)) => {
+        let whole_line = |missed: &mut Vec<String>, memo: &mut Memo| {
+            Pass {
+                catalog,
+                missed,
+                memo,
+            }
+            .line(line, 0)
+            .map(|out| {
+                if starts_lowercase(line) {
+                    out
+                } else {
+                    capitalize_first_letter(&out)
+                }
+            })
+        };
+        let cue = split_position_cue(line);
+        // "Discoveries tonight: 0 of 8." reads like a menu row and its
+        // position, but the catalog has it whole: that wins.
+        let whole = cue.and_then(|_| {
+            let mut whole_missed = Vec::new();
+            let out = whole_line(&mut whole_missed, &mut memo)?;
+            whole_missed.is_empty().then_some(out)
+        });
+        let out = match (whole, cue) {
+            (Some(out), _) => out,
+            (None, Some((row, position, count))) => {
                 let row = Pass {
                     catalog,
                     missed: &mut missed,
@@ -520,20 +565,7 @@ impl Translator {
                 let sep = if ends_full_width(&row) { "" } else { " " };
                 format!("{row}{sep}{cue}")
             }
-            None => Pass {
-                catalog,
-                missed: &mut missed,
-                memo: &mut memo,
-            }
-            .line(line, 0)
-            .map(|out| {
-                if starts_lowercase(line) {
-                    out
-                } else {
-                    capitalize_first_letter(&out)
-                }
-            })
-            .unwrap_or_else(|| line.to_string()),
+            (None, None) => whole_line(&mut missed, &mut memo).unwrap_or_else(|| line.to_string()),
         };
         let out = contract_articles(&catalog.language, out);
         if let Some(log) = &self.misses {
@@ -626,6 +658,19 @@ impl Pass<'_, '_> {
         let wrap = |inner: String| format!("{lead}{inner}{trail}");
         if let Some(hit) = self.catalog.exact.get(core) {
             return Some(wrap(hit.clone()));
+        }
+        // A language's Settings label, "Spanish (Español)": in another
+        // language it is the language's own name, which needs no catalog.
+        if let Some(autonym) = languages()
+            .find(|lang| lang.name != lang.autonym && lang.label() == core.trim_end_matches('.'))
+            .map(|lang| lang.autonym)
+        {
+            let out = if core.ends_with('.') {
+                self.with_full_stop(autonym.to_string())
+            } else {
+                autonym.to_string()
+            };
+            return Some(wrap(out));
         }
         // "Status ready to continue" inside "Status: {summary}" is the
         // catalog's whole sentence without its full stop. A whole sentence
@@ -875,6 +920,22 @@ impl Pass<'_, '_> {
         if direct.is_some() {
             return direct;
         }
+        // "bell 4, middle low" in "Place 2: bell 4, middle low." is the
+        // catalog's "Bell {bell}, {name}" lowercased to go mid-sentence.
+        if let Some(upper_form) = flipped.as_deref().filter(|_| !upper) {
+            if !self.catalog.exact.contains_key(upper_form) {
+                if let Some((weight, out)) = self.template(upper_form, depth) {
+                    // German capitalizes its nouns wherever they stand.
+                    let german = self.catalog.language.split('_').next() == Some("de");
+                    let out = if german {
+                        out
+                    } else {
+                        lowercase_first_letter(&out)
+                    };
+                    return Some((weight, out));
+                }
+            }
+        }
         let flipped = flipped?;
         let hit = self.catalog.exact.get(&flipped)?;
         Some((
@@ -936,14 +997,19 @@ impl Pass<'_, '_> {
         // A one-sentence template never swallows several sentences into a
         // hole: "It is {tod}." must not match "It is 9:00. Fuel is low.",
         // which the sentence splitter translates whole.
+        let catalog = self.catalog;
         let (template, captures) = self.catalog.templates.best_match(core, |template, caps| {
             // "{place}{state} on {highway}" has few letters of its own, but
             // its holes are names: it matches when what fills them reads as
             // names ("Groton", ", South Dakota", "US-12"), never words a loose
-            // match would swallow ("Status ready to continue").
+            // match would swallow ("Status ready to continue"). Nor words the
+            // catalog has whole: "{rank} of {suit}" is "6 of spades" when
+            // "spades" is a word of its own, as a game builds a card name.
             if template.numbers_only()
                 && !caps.iter().all(|(name, value)| {
-                    is_number(value) || (is_proper_name_hole(name) && reads_as_name(value))
+                    is_number(value)
+                        || (is_proper_name_hole(name) && reads_as_name(value))
+                        || catalog.knows_word(value)
                 })
             {
                 return false;
@@ -1064,6 +1130,16 @@ impl Pass<'_, '_> {
             .iter()
             .all(|seg| !matches!(seg, Seg::Hole(name) if !captures.contains_key(name.as_str()))));
         Some((template.weight, out))
+    }
+}
+
+/// `text` with its first letter lowercased, for a piece that goes
+/// mid-sentence.
+fn lowercase_first_letter(text: &str) -> String {
+    let mut chars = text.chars();
+    match chars.next() {
+        Some(first) => first.to_lowercase().chain(chars).collect(),
+        None => String::new(),
     }
 }
 

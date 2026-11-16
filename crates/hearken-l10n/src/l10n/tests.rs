@@ -797,3 +797,78 @@ fn bom_is_stripped_when_parsing_a_po_file() {
     let tr = Translator::new(catalog);
     assert_eq!(tr.translate("Hi."), "Hola.");
 }
+
+fn cards() -> Translator {
+    let po = r#"
+msgid ""
+msgstr ""
+"Language: es\n"
+
+msgid "spades"
+msgstr "picas"
+
+msgid "king"
+msgstr "rey"
+
+msgid "{rank} of {suit}"
+msgstr "{rank} de {suit}"
+
+msgid "Top card: {card}."
+msgstr "Carta de arriba: {card}."
+
+msgid "Bell {bell}, {name}"
+msgstr "Campana {bell}, {name}"
+
+msgid "the treble"
+msgstr "el tiple"
+
+msgid "Place {place}: {words}."
+msgstr "Posición {place}: {words}."
+
+msgid "Discoveries tonight: {found} of {spots}."
+msgstr "Descubrimientos esta noche: {found} de {spots}."
+"#;
+    Translator::new(Catalog::from_po("es", po).expect("test catalog parses"))
+}
+
+#[test]
+fn a_generic_template_takes_words_the_catalog_has_whole() {
+    let tr = cards();
+    assert_eq!(
+        tr.translate("Top card: king of spades."),
+        "Carta de arriba: rey de picas."
+    );
+    assert_eq!(
+        tr.translate("Top card: 6 of spades."),
+        "Carta de arriba: 6 de picas."
+    );
+    // A word the catalog does not have still keeps it out.
+    assert_eq!(
+        tr.translate("Top card: 6 of shovels."),
+        "Top card: 6 of shovels."
+    );
+}
+
+#[test]
+fn a_capitalised_template_fills_a_lowercased_piece() {
+    let tr = cards();
+    assert_eq!(
+        tr.translate("Place 1: bell 1, the treble."),
+        "Posición 1: campana 1, el tiple."
+    );
+}
+
+#[test]
+fn a_whole_line_beats_a_menu_position() {
+    let tr = cards();
+    assert_eq!(
+        tr.translate("Discoveries tonight: 0 of 8."),
+        "Descubrimientos esta noche: 0 de 8."
+    );
+}
+
+#[test]
+fn a_language_label_is_its_own_name() {
+    let tr = spanish();
+    assert_eq!(tr.translate("Russian (Русский)."), "Русский.");
+}

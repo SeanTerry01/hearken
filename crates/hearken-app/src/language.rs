@@ -138,6 +138,7 @@ impl<G: Game> Ctx<G> {
         let setting = self.settings.language.clone();
         let resolved = resolve_setting::<G>(&setting, &self.paths.data_dir);
         let fit = self.voice_fit();
+        self.language_fit = Some(fit);
         let forced = std::env::var(format!("{}{LANG_ENV_SUFFIX}", G::ENV_PREFIX))
             .is_ok_and(|value| !value.is_empty());
         let code = if forced {
@@ -160,6 +161,16 @@ impl<G: Game> Ctx<G> {
             self.speech.say(ENGLISH_ONLY_VOICE, false);
             self.delivery.project_main(ENGLISH_ONLY_VOICE, false);
             self.record(ENGLISH_ONLY_VOICE.to_string());
+        }
+    }
+
+    /// Load the language again when the voice changed under it: speech
+    /// switches backends on its own thread, so the voice in use is known a
+    /// few frames after the setting changes, and at launch only once speech
+    /// has started (Automatic stays English for the built-in voice).
+    pub(crate) fn follow_voice_language(&mut self) {
+        if self.language_fit.is_some_and(|was| was != self.voice_fit()) {
+            self.apply_language();
         }
     }
 
