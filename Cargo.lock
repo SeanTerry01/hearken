@@ -1271,6 +1271,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "hearken-l10n-tools"
+version = "0.1.0"
+dependencies = [
+ "regex",
+]
+
+[[package]]
 name = "hearken-pack"
 version = "0.1.0"
 dependencies = [
