@@ -114,6 +114,8 @@ pub struct Ctx<G: Game> {
     pub(crate) commentary: Option<Box<dyn crate::commentary::Commentary<G>>>,
     /// Set while `queued_speech` runs: `say` queues instead of interrupting.
     hold_interrupt: bool,
+    /// Whether this run has said `language::ENGLISH_ONLY_VOICE`.
+    pub(crate) told_english_only: bool,
 }
 
 impl<G: Game> Ctx<G> {
@@ -188,6 +190,7 @@ impl<G: Game> Ctx<G> {
             pending: Vec::new(),
             commentary: None,
             hold_interrupt: false,
+            told_english_only: false,
         };
         // So saved bus volumes are in effect from the very first frame, not
         // just once the real backend has finished opening.
@@ -545,6 +548,8 @@ impl<G: Game> Ctx<G> {
         self.apply_speech_settings();
         self.save_settings();
         self.say(line);
+        // Automatic follows the voice: English for the built-in one.
+        self.apply_language();
     }
 
     /// Turns Discord status on or off, as the player's setting. Saved with

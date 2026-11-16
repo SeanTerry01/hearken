@@ -24,7 +24,7 @@ pub struct Entry {
 }
 
 impl Entry {
-    #[cfg(test)]
+    /// An untranslated entry for `msgid`.
     pub fn new(msgid: &str) -> Self {
         Entry {
             msgid: msgid.to_string(),
