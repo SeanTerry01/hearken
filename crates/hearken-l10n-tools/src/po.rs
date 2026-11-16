@@ -85,8 +85,20 @@ fn quote(text: &str) -> String {
         text.replace('\\', "\\\\")
             .replace('"', "\\\"")
             .replace('\n', "\\n")
+            .replace('\r', "\\r")
             .replace('\t', "\\t")
     )
+}
+
+#[cfg(test)]
+#[test]
+fn carriage_returns_round_trip() {
+    let mut entry = Entry::new("A\r\nB");
+    entry.msgstr = "C\r".into();
+    let text = write_po(&[Entry::default(), entry], false);
+    let back = parse_po(&text).unwrap();
+    assert_eq!(back[1].msgid, "A\r\nB");
+    assert_eq!(back[1].msgstr, "C\r");
 }
 
 #[derive(PartialEq, Clone, Copy)]
