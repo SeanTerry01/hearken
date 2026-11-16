@@ -113,6 +113,19 @@ fn key_names(text: &str) -> Vec<&'static str> {
     found
 }
 
+/// Whether a line opens with "Enter" as a verb: "Enter it", "Enter the
+/// code", "Enter your name".
+fn entered_as_verb(msgid: &str) -> bool {
+    let mut words = msgid.split_whitespace();
+    words.next() == Some("Enter")
+        && words.next().is_some_and(|w| {
+            matches!(
+                w,
+                "it" | "a" | "an" | "the" | "your" | "this" | "that" | "them"
+            )
+        })
+}
+
 fn plural_forms(code: &str) -> usize {
     match code {
         "zh_CN" | "ja" | "vi" => 1,
@@ -191,7 +204,14 @@ pub fn check_entry(code: &str, msgid: &str, msgstr: &str) -> Vec<String> {
         }
     }
     let mut target_keys = key_names(msgstr);
-    for key in key_names(msgid) {
+    let mut source_keys = key_names(msgid);
+    // "Enter it at the site": the verb, not the key.
+    if entered_as_verb(msgid) {
+        if let Some(k) = source_keys.iter().position(|k| *k == "Enter") {
+            source_keys.remove(k);
+        }
+    }
+    for key in source_keys {
         match target_keys.iter().position(|k| *k == key) {
             Some(k) => {
                 target_keys.remove(k);
@@ -297,6 +317,7 @@ mod tests {
         assert!(problems.contains(&"loses the number 10".into()));
         assert!(problems.contains(&"translates or drops the key name Enter".into()));
         assert!(check_entry("es", "{n} load{s_ending}", "{n:carga|cargas}").is_empty());
+        assert!(check_entry("es", "Enter it at {place}", "Introdúcelo en {place}").is_empty());
         assert_eq!(
             check_entry("ru", "{n} load{s_ending}", "{n:a|b}"),
             ["{n:...} gives 2 forms; ru has 3"]
