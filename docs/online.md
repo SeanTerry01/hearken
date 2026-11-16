@@ -381,9 +381,14 @@ save (bests, counts), shaped by the server's `card` check and handed to its
 On the game's side, `hearken::sync::FileSync` drives these calls as an
 explicit state machine (`SyncState`): it asks for the file's bytes when it
 needs them (`Need::Export`), hands over the account's copy to merge
-(`Need::Merge`), and stops at `NeedsChoice` the first time an account meets
-a computer that already has progress of its own. `hearken::sync::testing::FakeSaves`
-answers the routes in memory for tests.
+(`Need::Merge`) together with the base, the last copy this computer and the
+account agreed on (kept sealed in the vault as `sync-<name>-base`), so the
+game can merge three ways, and stops at `NeedsChoice` the first time an
+account meets a computer that already has progress of its own. A file with
+no progress never goes up to an empty account. When the server no longer
+knows the token, the sync stops with `SyncEvent::SignedOut` for the game to
+tell the player. `hearken::sync::testing::FakeSaves` answers the routes in
+memory for tests.
 
 ## Play between players
 
