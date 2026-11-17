@@ -936,3 +936,42 @@ msgstr "{rank_words} de {name}"
     assert_eq!(tr.translate("8 of hearts"), "8 de corazones");
     assert_eq!(tr.translate("12 hearts"), "12 corazones");
 }
+
+#[test]
+fn sentences_that_translate_beat_a_template_for_the_whole_line() {
+    let po = r#"
+msgid ""
+msgstr ""
+"Language: es\n"
+
+msgid "{gathered} of {lanterns} lanterns gathered."
+msgstr "{gathered} de {lanterns} farolillos recogidos."
+
+msgid "{eggs} gathered."
+msgstr "Recoges {eggs}."
+
+msgid "{gathered} of {lanterns}.{joins} The song is whole."
+msgstr "{gathered} de {lanterns}.{joins} La canción está completa."
+
+msgid "The song is whole."
+msgstr "La canción está completa."
+
+msgid "none left to turn"
+msgstr "no queda ninguna por girar"
+
+msgid "{n} left to turn"
+msgstr "quedan {n} por girar"
+
+msgid "None"
+msgstr "Ninguno"
+"#;
+    let tr = Translator::new(Catalog::from_po("es", po).expect("test catalog parses"));
+    assert_eq!(
+        tr.translate("4 of 4 lanterns gathered. The song is whole."),
+        "4 de 4 farolillos recogidos. La canción está completa."
+    );
+    assert_eq!(
+        tr.translate("None left to turn."),
+        "No queda ninguna por girar."
+    );
+}

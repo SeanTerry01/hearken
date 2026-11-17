@@ -725,6 +725,19 @@ impl Pass<'_, '_> {
             let out = self.with_full_stop(hit.clone());
             return Some(wrap(out));
         }
+        // Sentences that each translate cleanly beat a template for the
+        // whole line: "4 of 4 lanterns gathered. The song is whole." is two
+        // sentences the catalog has, not "{gathered} of {lanterns}.{joins}
+        // The song is whole." with "4 lanterns gathered" as the count.
+        if split && depth < MAX_DEPTH && has_sentence_break(core) {
+            let start = self.missed.len();
+            if let Some(out) = self.split_by(core, depth, false) {
+                if self.missed.len() == start {
+                    return Some(wrap(out));
+                }
+            }
+            self.missed.truncate(start);
+        }
         let direct = self.lookup(core, depth);
         // "Score board." is the catalog's "Score board" with the full
         // stop a menu adds after an item.
@@ -790,23 +803,42 @@ impl Pass<'_, '_> {
             }
         }
         if split {
+            // Sentences that each translate beat a sentence the catalog has
+            // found inside the line: "4 of 4 lanterns gathered. The song is
+            // whole." is two sentences, not "The song is whole." with words
+            // around it.
+            let start = self.missed.len();
+            if let Some(out) = self.split_by(core, depth, false) {
+                if self.missed.len() == start {
+                    return Some(out);
+                }
+            }
+            self.missed.truncate(start);
             if let Some(out) = self.embedded(core, depth) {
                 return Some(out);
             }
+            if let Some(out) = self.split_by(core, depth, false) {
+                return Some(out);
+            }
         }
-        for (clauses, splitter) in [
-            (false, split_sentences as fn(&str) -> Vec<(&str, &str)>),
-            (true, split_clauses),
-        ] {
-            // A capture is split into sentences only when it holds several;
-            // clauses always, since they must all translate.
-            if !clauses && !split {
-                continue;
-            }
-            let pieces = splitter(core);
-            if pieces.len() < 2 {
-                continue;
-            }
+        if let Some(out) = self.split_by(core, depth, true) {
+            return Some(out);
+        }
+        self.lead_in(core, depth)
+    }
+
+    /// The piece split into sentences, or into clauses, each translated.
+    /// Clauses all translate or the piece stays English.
+    fn split_by(&mut self, core: &str, depth: usize, clauses: bool) -> Option<String> {
+        let pieces = if clauses {
+            split_clauses(core)
+        } else {
+            split_sentences(core)
+        };
+        if pieces.len() < 2 {
+            return None;
+        }
+        {
             let mut any = false;
             let mut whole = true;
             let mut out = String::new();
@@ -847,7 +879,7 @@ impl Pass<'_, '_> {
                 return Some(out);
             }
         }
-        self.lead_in(core, depth)
+        None
     }
 
     /// "Level 2 of 7: 19 crates of supplies from ... in Riverton,
@@ -952,6 +984,15 @@ impl Pass<'_, '_> {
         } else {
             None
         };
+        // "None left to turn" is the catalog's whole "none left to turn"
+        // capitalised to open a sentence: that beats "{n} left to turn".
+        if let Some(hit) = flipped.as_ref().and_then(|f| self.catalog.exact.get(f)) {
+            return Some(Hit::exact(if upper {
+                capitalize(hit)
+            } else {
+                hit.clone()
+            }));
+        }
         let direct = self.template(core, depth);
         // A fragment the game capitalised to open a sentence ("Divided, two
         // lanes your side") fills its lowercase template, and that template
@@ -988,13 +1029,6 @@ impl Pass<'_, '_> {
                     }
                 }
             }
-        }
-        if let Some(hit) = flipped.and_then(|flipped| self.catalog.exact.get(&flipped)) {
-            return Some(Hit::exact(if upper {
-                capitalize(hit)
-            } else {
-                hit.clone()
-            }));
         }
         direct
     }
