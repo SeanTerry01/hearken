@@ -1138,3 +1138,50 @@ msgstr "Downtown"
         "ロードバイクでDowntown。"
     );
 }
+
+#[test]
+fn a_hole_that_took_a_clause_gives_way_to_a_fuller_template() {
+    let po = r#"
+msgid ""
+msgstr ""
+"Language: ru\n"
+
+msgid "road bike"
+msgstr "шоссейный велосипед"
+
+msgid "Against the clock"
+msgstr "Наперегонки со временем"
+
+msgid "Downtown"
+msgstr "Downtown"
+
+msgid "Against the clock, {name}"
+msgstr "Наперегонки со временем, {name}"
+
+msgid "{words}, on the {side}."
+msgstr "{words}, сторона: {side}."
+
+msgid "{clock_name}, {district}, on the {bike}."
+msgstr "{clock_name}, {district}, {bike}."
+
+msgid "{name} skipped."
+msgstr "{name}: пропущено."
+
+msgid "{scene}: skipped"
+msgstr "{scene}: пропущено"
+
+msgid "learn to play"
+msgstr "учимся играть"
+
+msgid "Tightrope, {what}"
+msgstr "Tightrope, {what}"
+"#;
+    let tr = Translator::new(Catalog::from_po("ru", po).expect("test catalog parses"));
+    assert_eq!(
+        tr.translate("Against the clock, Downtown, on the road bike."),
+        "Наперегонки со временем, Downtown, шоссейный велосипед."
+    );
+    assert!(!tr
+        .translate("Tightrope, learn to play: skipped.")
+        .contains("::"));
+}

@@ -295,6 +295,12 @@ const COUNTED_UNITS: &[&str] = &[
     "points",
 ];
 
+/// Words an amount before a unit may hold: "1 minute 20 seconds",
+/// "half a" metre.
+const AMOUNT_WORDS: &[&str] = &[
+    "minute", "minutes", "hour", "hours", "and", "a", "half", "an",
+];
+
 /// Holes that always hold a number.
 const COUNT_HOLES: &[&str] = &["n", "count", "number", "num", "total", "index"];
 
@@ -309,6 +315,9 @@ struct Hit {
     weight: usize,
     out: String,
     kept: Vec<String>,
+    /// A hole took a clause (", "): a looser fit than one whose holes
+    /// hold single values.
+    loose: bool,
 }
 
 impl Hit {
@@ -317,12 +326,19 @@ impl Hit {
             weight: usize::MAX,
             out,
             kept: Vec::new(),
+            loose: false,
         }
     }
 
     /// A match that keeps no English beats one that does; then the heavier.
     fn rank(&self) -> (bool, usize) {
         (self.kept.is_empty(), self.weight)
+    }
+
+    /// As `rank`, but a match whose holes took no clause beats one whose
+    /// hole did.
+    fn rank_tight(&self) -> (bool, bool, usize) {
+        (self.kept.is_empty(), !self.loose, self.weight)
     }
 }
 /// Lines whose translation is remembered (the drive repeats itself).
@@ -786,7 +802,9 @@ impl Pass<'_, '_> {
                 Some(hit)
             });
         let best = match (direct, stopped) {
-            (Some(direct), Some(stopped)) if stopped.rank() > direct.rank() => Some(stopped),
+            (Some(direct), Some(stopped)) if stopped.rank_tight() > direct.rank_tight() => {
+                Some(stopped)
+            }
             (Some(direct), _) => Some(direct),
             (None, stopped) => stopped,
         };
@@ -1232,22 +1250,41 @@ impl Pass<'_, '_> {
         // A clean hit and its hole count: of two templates as heavy, the
         // one with more holes wins, as "Next night: night {next}, {name}"
         // beats "Next night: night {next}" with "2, every side" as {next}.
-        let mut clean: Option<(Hit, usize)> = None;
+        // A clean hit, its hole count, and whether a hole took a clause
+        // (", "). A hit whose hole took a clause gives way to a lighter
+        // template with more holes and none: "Against the clock, {name}"
+        // with "Downtown, on the road bike" as the name loses to
+        // "{clock_name}, {district}, on the {bike}".
+        let mut clean: Option<(Hit, usize, bool)> = None;
+        // What followed the comma in the clean hit's loose holes: a lighter
+        // template must read its own words there to take over.
+        let mut best_tails: Vec<String> = Vec::new();
+        let mut tried_lighter = 0;
         for (template, captures) in catalog
             .templates
             .matches(core, move |template, caps| accepts(catalog, template, caps))
         {
             let holes = captures.len();
-            if let Some((best, best_holes)) = &clean {
+            let loose = captures.values().any(|value| value.contains(", "));
+            if let Some((best, best_holes, best_loose)) = &clean {
                 if template.weight < best.weight {
-                    break;
-                }
-                if holes <= *best_holes {
+                    if !*best_loose {
+                        break;
+                    }
+                    tried_lighter += 1;
+                    if tried_lighter > MAX_LOOSER_TRIES {
+                        break;
+                    }
+                    if loose || holes <= *best_holes || !reads_into(template, &best_tails) {
+                        continue;
+                    }
+                } else if holes <= *best_holes {
                     continue;
                 }
                 if let Some(hit) = self.render(template, &captures, depth) {
                     if hit.kept.is_empty() {
-                        clean = Some((hit, holes));
+                        best_tails = clause_tails(&captures);
+                        clean = Some((hit, holes, loose));
                     }
                 }
                 continue;
@@ -1262,12 +1299,26 @@ impl Pass<'_, '_> {
                 continue;
             };
             if hit.kept.is_empty() {
-                clean = Some((hit, holes));
+                best_tails = clause_tails(&captures);
+                clean = Some((hit, holes, loose));
                 continue;
             }
             kept_some.get_or_insert(hit);
         }
-        clean.map(|(hit, _)| hit).or(kept_some)
+        clean.map(|(hit, _, _)| hit).or(kept_some)
+    }
+
+    /// "1, 2, 3, 4" in Chinese or Japanese, with their own comma.
+    fn cjk_number_list(&self, raw: &str) -> Option<String> {
+        let cjk = matches!(
+            self.catalog.language.split('_').next().unwrap_or_default(),
+            "zh" | "ja"
+        );
+        (cjk && raw.contains(", ")
+            && raw
+                .chars()
+                .all(|c| c.is_ascii_digit() || c == ',' || c == ' '))
+        .then(|| raw.replace(", ", "\u{3001}"))
     }
 
     fn render(
@@ -1304,6 +1355,8 @@ impl Pass<'_, '_> {
                             .then(|| raw.strip_prefix("the ").or(raw.strip_prefix("The ")))
                             .flatten();
                         out.push_str(bare.unwrap_or(raw));
+                    } else if let Some(list) = self.cjk_number_list(raw) {
+                        out.push_str(&list);
                     } else if let Some(number) =
                         plural::localize_number(&self.catalog.language, raw)
                     {
@@ -1368,8 +1421,33 @@ impl Pass<'_, '_> {
             weight: template.weight,
             out,
             kept,
+            loose: captures.values().any(|value| value.contains(", ")),
         })
     }
+}
+
+/// The lowercase text after the first ", " in each capture that has one.
+fn clause_tails(captures: &HashMap<&str, &str>) -> Vec<String> {
+    captures
+        .values()
+        .filter_map(|value| value.split_once(", ").map(|(_, tail)| tail.to_lowercase()))
+        .collect()
+}
+
+/// Whether a literal word of `template` stands in one of `tails`.
+fn reads_into(template: &Template, tails: &[String]) -> bool {
+    template.segs.iter().any(|seg| match seg {
+        Seg::Lit(text) => text
+            .split(|c: char| !c.is_alphabetic())
+            .filter(|word| word.len() >= 2)
+            .any(|word| {
+                let word = word.to_lowercase();
+                tails
+                    .iter()
+                    .any(|tail| tail.split(|c: char| !c.is_alphabetic()).any(|w| w == word))
+            }),
+        Seg::Hole(_) => false,
+    })
 }
 
 /// Whether a template the line fills may take these captures.
@@ -1408,6 +1486,14 @@ fn accepts(catalog: &Catalog, template: &Template, caps: &HashMap<&str, &str>) -
             return false;
         }
     }
+    // A hole never ends on the comma or colon of the frame around it:
+    // "{name} skipped." is not {name} = "Fireside Patience, learn to play:".
+    if caps
+        .values()
+        .any(|value| value.trim_end().ends_with([',', ':']))
+    {
+        return false;
+    }
     // A hole a word follows, as in "{got_away} got away", is a count of
     // that word: never a list of counts, "0 perfect, 0 missed, 10".
     if caps.iter().any(|(name, value)| {
@@ -1423,10 +1509,9 @@ fn accepts(catalog: &Catalog, template: &Template, caps: &HashMap<&str, &str>) -
         before_unit(template, name)
             && (value.contains(", ")
                 || value
-                    .split_whitespace()
-                    .filter(|w| w.chars().any(char::is_alphabetic))
-                    .count()
-                    > 2)
+                    .split(|c: char| !c.is_alphabetic())
+                    .filter(|w| !w.is_empty())
+                    .any(|w| !AMOUNT_WORDS.contains(&w)))
     }) {
         return false;
     }
