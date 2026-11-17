@@ -275,6 +275,33 @@ fn is_proper_name_hole(name: &str) -> bool {
 // A drive-start line nests that deep: the line, its objective, the trip
 // progress inside it, and the distance inside that.
 const MAX_DEPTH: usize = 6;
+
+/// How many lighter templates are tried for one that keeps no English
+/// once a template that keeps some has matched.
+const MAX_LOOSER_TRIES: usize = 8;
+
+/// A rendered template match: its literal weight, the translated line, and
+/// the English pieces its holes kept as they were.
+struct Hit {
+    weight: usize,
+    out: String,
+    kept: Vec<String>,
+}
+
+impl Hit {
+    fn exact(out: String) -> Self {
+        Self {
+            weight: usize::MAX,
+            out,
+            kept: Vec::new(),
+        }
+    }
+
+    /// A match that keeps no English beats one that does; then the heavier.
+    fn rank(&self) -> (bool, usize) {
+        (self.kept.is_empty(), self.weight)
+    }
+}
 /// Lines whose translation is remembered (the drive repeats itself).
 const CACHE_LIMIT: usize = 8192;
 
@@ -714,39 +741,57 @@ impl Pass<'_, '_> {
                 if bare.ends_with(['.', ':', ',', ';']) {
                     return None;
                 }
-                let (weight, mut out) = self.lookup(bare, depth)?;
+                let mut hit = self.lookup(bare, depth)?;
                 if mark == '.' {
-                    out = self.with_full_stop(out);
+                    hit.out = self.with_full_stop(hit.out);
                 } else {
-                    out.push(mark);
+                    hit.out.push(mark);
                 }
-                Some((weight, out))
+                Some(hit)
             });
         let best = match (direct, stopped) {
-            (Some(direct), Some(stopped)) if stopped.0 > direct.0 => Some(stopped),
+            (Some(direct), Some(stopped)) if stopped.rank() > direct.rank() => Some(stopped),
             (Some(direct), _) => Some(direct),
             (None, stopped) => stopped,
         };
-        if let Some((_, out)) = best {
-            return Some(wrap(out));
+        match best {
+            Some(hit) if hit.kept.is_empty() => Some(wrap(hit.out)),
+            // A match that keeps English pieces loses to splitting the
+            // line, when every piece of that translates.
+            Some(hit) => {
+                let start = self.missed.len();
+                let split_out = self.split_piece(core, depth, split);
+                if split_out.is_some() && self.missed.len() == start {
+                    return split_out.map(wrap);
+                }
+                self.missed.truncate(start);
+                self.missed.extend(hit.kept);
+                Some(wrap(hit.out))
+            }
+            None => self.split_piece(core, depth, split).map(wrap),
         }
+    }
+
+    /// A piece no exact entry or template has whole: its sentences,
+    /// clauses or lead-in, translated each.
+    fn split_piece(&mut self, core: &str, depth: usize, split: bool) -> Option<String> {
         if depth >= MAX_DEPTH {
             return None;
         }
         // "Status ready to continue" after "Status: " is the catalog's
         // sentence without its full stop.
         if !core.ends_with(['.', '!', '?', ':', ';', ',']) {
-            if let Some((_, out)) = self.lookup(&format!("{core}."), depth) {
+            if let Some(Hit { out, .. }) = self.lookup(&format!("{core}."), depth) {
                 let out = out
                     .strip_suffix(['.', '\u{3002}'])
                     .map(str::to_string)
                     .unwrap_or(out);
-                return Some(wrap(out));
+                return Some(out);
             }
         }
         if split {
             if let Some(out) = self.embedded(core, depth) {
-                return Some(wrap(out));
+                return Some(out);
             }
         }
         for (clauses, splitter) in [
@@ -799,10 +844,10 @@ impl Pass<'_, '_> {
             // or the sentence stays English rather than come out mixed.
             if any && (whole || !clauses) {
                 self.missed.extend(missed);
-                return Some(wrap(out));
+                return Some(out);
             }
         }
-        self.lead_in(core, depth).map(wrap)
+        self.lead_in(core, depth)
     }
 
     /// "Level 2 of 7: 19 crates of supplies from ... in Riverton,
@@ -893,9 +938,9 @@ impl Pass<'_, '_> {
     /// ("Confirmed spare seat.") is the catalog's lowercase fragment.
     /// With the match's weight: a template's literal letters, or
     /// `usize::MAX` for an exact entry.
-    fn lookup(&mut self, core: &str, depth: usize) -> Option<(usize, String)> {
+    fn lookup(&mut self, core: &str, depth: usize) -> Option<Hit> {
         if let Some(hit) = self.catalog.exact.get(core) {
-            return Some((usize::MAX, hit.clone()));
+            return Some(Hit::exact(hit.clone()));
         }
         let mut chars = core.chars();
         let first = chars.next()?;
@@ -913,38 +958,45 @@ impl Pass<'_, '_> {
         // wins over a looser one that would swallow "Divided" into a hole.
         if let Some(lower) = flipped.as_deref().filter(|_| upper) {
             if !self.catalog.exact.contains_key(lower) {
-                if let Some((weight, out)) = self.template(lower, depth) {
-                    if direct.as_ref().is_none_or(|(best, _)| weight > *best) {
-                        return Some((weight, capitalize(&out)));
+                if let Some(hit) = self.template(lower, depth) {
+                    if direct.as_ref().is_none_or(|best| hit.rank() > best.rank()) {
+                        return Some(Hit {
+                            out: capitalize(&hit.out),
+                            ..hit
+                        });
                     }
                 }
             }
         }
-        if direct.is_some() {
+        if direct.as_ref().is_some_and(|hit| hit.kept.is_empty()) {
             return direct;
         }
         // "bell 4, middle low" in "Place 2: bell 4, middle low." is the
         // catalog's "Bell {bell}, {name}" lowercased to go mid-sentence.
         if let Some(upper_form) = flipped.as_deref().filter(|_| !upper) {
             if !self.catalog.exact.contains_key(upper_form) {
-                if let Some((weight, out)) = self.template(upper_form, depth) {
-                    // German capitalizes its nouns wherever they stand.
-                    let german = self.catalog.language.split('_').next() == Some("de");
-                    let out = if german {
-                        out
-                    } else {
-                        lowercase_first_letter(&out)
-                    };
-                    return Some((weight, out));
+                if let Some(hit) = self.template(upper_form, depth) {
+                    if direct.as_ref().is_none_or(|best| hit.rank() > best.rank()) {
+                        // German capitalizes its nouns wherever they stand.
+                        let german = self.catalog.language.split('_').next() == Some("de");
+                        let out = if german {
+                            hit.out
+                        } else {
+                            lowercase_first_letter(&hit.out)
+                        };
+                        return Some(Hit { out, ..hit });
+                    }
                 }
             }
         }
-        let flipped = flipped?;
-        let hit = self.catalog.exact.get(&flipped)?;
-        Some((
-            usize::MAX,
-            if upper { capitalize(hit) } else { hit.clone() },
-        ))
+        if let Some(hit) = flipped.and_then(|flipped| self.catalog.exact.get(&flipped)) {
+            return Some(Hit::exact(if upper {
+                capitalize(hit)
+            } else {
+                hit.clone()
+            }));
+        }
+        direct
     }
 
     fn with_full_stop(&self, mut out: String) -> String {
@@ -996,66 +1048,46 @@ impl Pass<'_, '_> {
         Some(out)
     }
 
-    fn template(&mut self, core: &str, depth: usize) -> Option<(usize, String)> {
-        // A one-sentence template never swallows several sentences into a
-        // hole: "It is {tod}." must not match "It is 9:00. Fuel is low.",
-        // which the sentence splitter translates whole.
+    /// The best template the line fills, rendered: its literal weight,
+    /// the line, and the English pieces its holes kept. A template that
+    /// keeps no English beats a heavier one that does: "8 of hearts" is
+    /// "{rank_words} of {name}", not "{n} hearts" holding "8 of".
+    fn template(&mut self, core: &str, depth: usize) -> Option<Hit> {
         let catalog = self.catalog;
-        let (template, captures) = self.catalog.templates.best_match(core, |template, caps| {
-            // "{place}{state} on {highway}" has few letters of its own, but
-            // its holes are names: it matches when what fills them reads as
-            // names ("Groton", ", South Dakota", "US-12"), never words a loose
-            // match would swallow ("Status ready to continue"). Nor words the
-            // catalog has whole: "{rank} of {suit}" is "6 of spades" when
-            // "spades" is a word of its own, as a game builds a card name.
-            if template.numbers_only()
-                && !caps.iter().all(|(name, value)| {
-                    is_number(value)
-                        || (is_proper_name_hole(name) && reads_as_name(value))
-                        || catalog.knows_word(value)
-                })
-            {
-                return false;
-            }
-            // A name never holds a lead-in: "{studio} is looking for ..."
-            // must not take "Mission brief: Pinecone Lantern Works" as
-            // the studio and leave the label English; nor does a hole that
-            // opens a template: "{name} Company Yard" must not take
-            // "company yard: Chicago" and say the label twice.
-            if caps.iter().any(|(name, value)| {
-                value.contains(": ")
-                    && (is_proper_name_hole(name)
-                        || (matches!(template.segs.first(), Some(Seg::Hole(first)) if first == name)
-                            && !template.filled.contains(':')))
-            }) {
-                return false;
-            }
-            // A name that opens a template reads as one: "{the_city} metro
-            // local market" must not take "12 crates of general goods
-            // from Harbor yard in Harbor to the Capital" as its city.
-            if let Some(Seg::Hole(first)) = template.segs.first() {
-                if is_proper_name_hole(first)
-                    && caps
-                        .get(first.as_str())
-                        .is_some_and(|value| !reads_as_place(value))
-                {
-                    return false;
+        let mut kept_some: Option<Hit> = None;
+        let mut tried_after = 0;
+        for (template, captures) in catalog
+            .templates
+            .matches(core, move |template, caps| accepts(catalog, template, caps))
+        {
+            if kept_some.is_some() {
+                tried_after += 1;
+                if tried_after > MAX_LOOSER_TRIES {
+                    break;
                 }
             }
-            // Only a hole that ends the template or opens a sentence of it
-            // may hold sentences of its own ("Status: {summary}", "How to play.
-            // {controls} {page_title}"): "{pct} percent {direction}
-            // ahead{length}. {advice}" must not take a whole help text as
-            // its percent and leave it English.
-            let multi = has_sentence_break(&template.filled);
-            !caps.iter().any(|(name, value)| {
-                has_sentence_break(value) && !(multi && holds_sentences(&template.segs, name))
-            })
-        })?;
+            let Some(hit) = self.render(template, &captures, depth) else {
+                continue;
+            };
+            if hit.kept.is_empty() {
+                return Some(hit);
+            }
+            kept_some.get_or_insert(hit);
+        }
+        kept_some
+    }
+
+    fn render(
+        &mut self,
+        template: &Template,
+        captures: &HashMap<&str, &str>,
+        depth: usize,
+    ) -> Option<Hit> {
         let mut out = String::new();
         // English words the holes would keep, untranslated, inside the
         // translated frame.
         let mut kept_english = 0;
+        let mut kept = Vec::new();
         for part in &template.translation {
             match part {
                 Part::Lit(text) => out.push_str(text),
@@ -1096,8 +1128,15 @@ impl Pass<'_, '_> {
                         .piece(raw, depth + 1, has_sentence_break(raw));
                         // A measure ("2 miles") or a name kept as is is
                         // not a word left behind.
-                        if translated.is_none() && !is_name_like(raw) && !is_measure(raw) {
-                            kept_english += raw.chars().filter(|c| c.is_alphabetic()).count();
+                        if translated.is_none() && !is_name_like(raw) {
+                            if !is_measure(raw) {
+                                kept_english += raw.chars().filter(|c| c.is_alphabetic()).count();
+                            }
+                            // A measure left as it is still counts against
+                            // the match: "9 days" is words of the language too.
+                            if has_words(raw) {
+                                kept.push(raw.trim().to_string());
+                            }
                         }
                         let translated = match translated {
                             // A capture that opens a sentence of the frame
@@ -1132,8 +1171,77 @@ impl Pass<'_, '_> {
             .segs
             .iter()
             .all(|seg| !matches!(seg, Seg::Hole(name) if !captures.contains_key(name.as_str()))));
-        Some((template.weight, out))
+        Some(Hit {
+            weight: template.weight,
+            out,
+            kept,
+        })
     }
+}
+
+/// Whether a template the line fills may take these captures.
+fn accepts(catalog: &Catalog, template: &Template, caps: &HashMap<&str, &str>) -> bool {
+    // A one-sentence template never swallows several sentences into a
+    // hole: "It is {tod}." must not match "It is 9:00. Fuel is low.",
+    // which the sentence splitter translates whole.
+    // "{place}{state} on {highway}" has few letters of its own, but
+    // its holes are names: it matches when what fills them reads as
+    // names ("Groton", ", South Dakota", "US-12"), never words a loose
+    // match would swallow ("Status ready to continue"). Nor words the
+    // catalog has whole: "{rank} of {suit}" is "6 of spades" when
+    // "spades" is a word of its own, as a game builds a card name.
+    // Numbers alone never fill one either: "2 of 2." after a menu
+    // row is its position, not "{rank_words} of {name}".
+    if template.numbers_only()
+        && caps
+            .iter()
+            .all(|(_, value)| is_number(value) || value.trim().is_empty())
+    {
+        return false;
+    }
+    if template.numbers_only()
+        && !caps.iter().all(|(name, value)| {
+            is_number(value)
+                || (is_proper_name_hole(name) && reads_as_name(value))
+                || catalog.knows_word(value)
+        })
+    {
+        return false;
+    }
+    // A name never holds a lead-in: "{studio} is looking for ..."
+    // must not take "Mission brief: Pinecone Lantern Works" as
+    // the studio and leave the label English; nor does a hole that
+    // opens a template: "{name} Company Yard" must not take
+    // "company yard: Chicago" and say the label twice.
+    if caps.iter().any(|(name, value)| {
+        value.contains(": ")
+            && (is_proper_name_hole(name)
+                || (matches!(template.segs.first(), Some(Seg::Hole(first)) if first == name)
+                    && !template.filled.contains(':')))
+    }) {
+        return false;
+    }
+    // A name that opens a template reads as one: "{the_city} metro
+    // local market" must not take "12 crates of general goods
+    // from Harbor yard in Harbor to the Capital" as its city.
+    if let Some(Seg::Hole(first)) = template.segs.first() {
+        if is_proper_name_hole(first)
+            && caps
+                .get(first.as_str())
+                .is_some_and(|value| !reads_as_place(value))
+        {
+            return false;
+        }
+    }
+    // Only a hole that ends the template or opens a sentence of it
+    // may hold sentences of its own ("Status: {summary}", "How to play.
+    // {controls} {page_title}"): "{pct} percent {direction}
+    // ahead{length}. {advice}" must not take a whole help text as
+    // its percent and leave it English.
+    let multi = has_sentence_break(&template.filled);
+    !caps.iter().any(|(name, value)| {
+        has_sentence_break(value) && !(multi && holds_sentences(&template.segs, name))
+    })
 }
 
 /// `text` with its first letter lowercased, for a piece that goes

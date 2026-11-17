@@ -892,3 +892,47 @@ msgstr "从{from}到{to}"
     let tr = Translator::new(Catalog::from_po("zh_CN", po).expect("test catalog parses"));
     assert_eq!(tr.translate("Enter to start."), "Enter to start.");
 }
+
+#[test]
+fn numbers_alone_never_fill_a_generic_template() {
+    let po = r#"
+msgid ""
+msgstr ""
+"Language: ru\n"
+
+msgid "{position} of {count}."
+msgstr "{position} из {count}."
+
+msgid "{rank_words} of {name}"
+msgstr "{rank_words} масти {name}"
+
+msgid "No, keep playing."
+msgstr "Нет, играть дальше."
+"#;
+    let tr = Translator::new(Catalog::from_po("ru", po).expect("test catalog parses"));
+    assert_eq!(
+        tr.translate("No, keep playing. 2 of 2."),
+        "Нет, играть дальше. 2 из 2."
+    );
+}
+
+#[test]
+fn a_template_that_keeps_no_english_beats_a_heavier_one() {
+    let po = r#"
+msgid ""
+msgstr ""
+"Language: es\n"
+
+msgid "hearts"
+msgstr "corazones"
+
+msgid "{n} hearts"
+msgstr "{n} corazones"
+
+msgid "{rank_words} of {name}"
+msgstr "{rank_words} de {name}"
+"#;
+    let tr = Translator::new(Catalog::from_po("es", po).expect("test catalog parses"));
+    assert_eq!(tr.translate("8 of hearts"), "8 de corazones");
+    assert_eq!(tr.translate("12 hearts"), "12 corazones");
+}
