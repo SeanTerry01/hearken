@@ -214,7 +214,7 @@ fn template_entries(project: &Project) -> Result<Vec<Entry>> {
             .into_iter()
             .map(str::to_string)
             .collect();
-        if sentences.len() < 2 || !PLACEHOLDER.is_match(&template.msgid) {
+        if !PLACEHOLDER.is_match(&template.msgid) {
             continue;
         }
         // "{status} Build a row of {places} bells." opens with a hole that
@@ -228,6 +228,9 @@ fn template_entries(project: &Project) -> Result<Vec<Entry>> {
             if rest.chars().next().is_some_and(|c| c.is_ascii_uppercase()) {
                 sentences.push(rest);
             }
+        }
+        if sentences.len() < 2 {
+            continue;
         }
         add_pieces(
             &mut catalog,
