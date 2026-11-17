@@ -239,6 +239,32 @@ fn template_entries(project: &Project) -> Result<Vec<Entry>> {
             "one sentence of a longer line",
         );
     }
+    // A sound check row ("Creaking floor: a building noise, off to one
+    // side.") is often said as its name alone, or its meaning alone, so
+    // each half is an entry too.
+    for template in catalog.entries.clone() {
+        if !template.refs.iter().any(|r| r.contains("sound")) {
+            continue;
+        }
+        let Some((head, rest)) = template.msgid.split_once(": ") else {
+            continue;
+        };
+        let words = head.split_whitespace().count();
+        if words == 0
+            || words > 4
+            || PLACEHOLDER.is_match(head)
+            || !head.chars().next().is_some_and(|c| c.is_uppercase())
+            || head.ends_with(['.', '!', '?'])
+        {
+            continue;
+        }
+        add_pieces(
+            &mut catalog,
+            &template,
+            vec![head.to_string(), rest.to_string()],
+            "the name or the meaning of a longer line",
+        );
+    }
     // A piece the game appends to a longer line (", automatic speed control
     // paused{keeper_target}") reaches the player inside that line, where the
     // game translates it clause by clause. Each of its clauses is a
