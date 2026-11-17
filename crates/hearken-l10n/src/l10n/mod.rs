@@ -416,7 +416,10 @@ impl Catalog {
         if value.is_empty() || value.contains(['.', ':', ';', ',']) {
             return false;
         }
-        if self.exact.contains_key(value) {
+        // A word kept as it is ("Enter", a key name) is no word of the
+        // language: "Enter to start" is not "{from} to {to}".
+        let changes = |key: &str| self.exact.get(key).is_some_and(|out| out != key);
+        if changes(value) {
             return true;
         }
         let mut chars = value.chars();
@@ -426,7 +429,7 @@ impl Catalog {
             } else {
                 first.to_uppercase().chain(chars).collect()
             };
-            self.exact.contains_key(&flipped)
+            changes(&flipped)
         })
     }
 

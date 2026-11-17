@@ -872,3 +872,23 @@ fn a_language_label_is_its_own_name() {
     let tr = spanish();
     assert_eq!(tr.translate("Russian (Русский)."), "Русский.");
 }
+
+#[test]
+fn a_word_kept_as_it_is_never_fills_a_generic_template() {
+    let po = r#"
+msgid ""
+msgstr ""
+"Language: zh_CN\n"
+
+msgid "Enter"
+msgstr "Enter"
+
+msgid "start"
+msgstr "开始"
+
+msgid "{from} to {to}"
+msgstr "从{from}到{to}"
+"#;
+    let tr = Translator::new(Catalog::from_po("zh_CN", po).expect("test catalog parses"));
+    assert_eq!(tr.translate("Enter to start."), "Enter to start.");
+}
