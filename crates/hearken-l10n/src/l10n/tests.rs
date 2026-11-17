@@ -1037,3 +1037,26 @@ msgstr "コオロギ"
     );
     assert_eq!(tr.translate("Frogs, crickets"), "カエル、コオロギ");
 }
+
+#[test]
+fn a_hole_never_takes_a_number_and_the_clause_after_it() {
+    let po = r#"
+msgid ""
+msgstr ""
+"Language: ja\n"
+
+msgid "Next night: night {next}"
+msgstr "次の夜：第{next}夜"
+
+msgid "Next night: night {next}, {name}"
+msgstr "次の夜：第{next}夜、{name}"
+
+msgid "every side"
+msgstr "どの方向からも"
+"#;
+    let tr = Translator::new(Catalog::from_po("ja", po).expect("test catalog parses"));
+    assert_eq!(
+        tr.translate("Next night: night 2, every side"),
+        "次の夜：第2夜、どの方向からも"
+    );
+}

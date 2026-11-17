@@ -22,6 +22,7 @@
 //! program or in the data folder.
 
 use std::borrow::Cow;
+use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::path::PathBuf;
@@ -278,6 +279,9 @@ const MAX_DEPTH: usize = 6;
 
 /// How many lighter templates are tried for one that keeps no English
 /// once a template that keeps some has matched.
+/// Holes that always hold a number.
+const COUNT_HOLES: &[&str] = &["n", "count", "number", "num", "total", "index"];
+
 /// The most sentences a catalog entry holds whole.
 const MAX_SENTENCE_GROUP: usize = 4;
 
@@ -963,8 +967,11 @@ impl Pass<'_, '_> {
                     continue;
                 }
                 let english = out.is_none() && has_words(group) && !is_name_like(group);
+                // Fewest pieces left English, then the most groups: a run
+                // is kept whole only when its sentences do not translate
+                // one by one.
                 let score = (left + english as usize, groups + 1);
-                if best[i].is_none_or(|b| score < b) {
+                if best[i].is_none_or(|b| (score.0, Reverse(score.1)) < (b.0, Reverse(b.1))) {
                     best[i] = Some(score);
                     cut.insert(i, (j, out, missed));
                 }
@@ -1206,10 +1213,29 @@ impl Pass<'_, '_> {
         let catalog = self.catalog;
         let mut kept_some: Option<Hit> = None;
         let mut tried_after = 0;
+        // A clean hit and its hole count: of two templates as heavy, the
+        // one with more holes wins, as "Next night: night {next}, {name}"
+        // beats "Next night: night {next}" with "2, every side" as {next}.
+        let mut clean: Option<(Hit, usize)> = None;
         for (template, captures) in catalog
             .templates
             .matches(core, move |template, caps| accepts(catalog, template, caps))
         {
+            let holes = captures.len();
+            if let Some((best, best_holes)) = &clean {
+                if template.weight < best.weight {
+                    break;
+                }
+                if holes <= *best_holes {
+                    continue;
+                }
+                if let Some(hit) = self.render(template, &captures, depth) {
+                    if hit.kept.is_empty() {
+                        clean = Some((hit, holes));
+                    }
+                }
+                continue;
+            }
             if kept_some.is_some() {
                 tried_after += 1;
                 if tried_after > MAX_LOOSER_TRIES {
@@ -1220,11 +1246,12 @@ impl Pass<'_, '_> {
                 continue;
             };
             if hit.kept.is_empty() {
-                return Some(hit);
+                clean = Some((hit, holes));
+                continue;
             }
             kept_some.get_or_insert(hit);
         }
-        kept_some
+        clean.map(|(hit, _)| hit).or(kept_some)
     }
 
     fn render(
@@ -1342,6 +1369,23 @@ fn accepts(catalog: &Catalog, template: &Template, caps: &HashMap<&str, &str>) -
     // "spades" is a word of its own, as a game builds a card name.
     // Numbers alone never fill one either: "2 of 2." after a menu
     // row is its position, not "{rank_words} of {name}".
+    // A hole named for a count holds a number: "Night {n}" is never "Night
+    // 1, over the chimney" with the words in {n}.
+    if caps
+        .iter()
+        .any(|(name, value)| COUNT_HOLES.contains(name) && !is_number(value))
+    {
+        return false;
+    }
+    // Nor does any hole take a number and the clause after it: "Play,
+    // night {next}" is not "Play, night 1, over the chimney".
+    if caps.values().any(|value| {
+        value
+            .split_once(", ")
+            .is_some_and(|(head, rest)| is_number(head) && has_words(rest))
+    }) {
+        return false;
+    }
     // A number never takes the full stop that ends its sentence: "Night
     // 1." is "Night {n}" with a stop after it, not {n} = "1.".
     if caps
