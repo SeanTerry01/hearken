@@ -1060,3 +1060,81 @@ msgstr "どの方向からも"
         "次の夜：第2夜、どの方向からも"
     );
 }
+
+#[test]
+fn a_hole_followed_by_its_unit_holds_a_number() {
+    let po = r#"
+msgid ""
+msgstr ""
+"Language: ja\n"
+
+msgid "Car door {when}."
+msgstr "車のドア、{when}。"
+
+msgid "in {s} seconds"
+msgstr "{s}秒後"
+
+msgid "{seconds} seconds."
+msgstr "{seconds}秒。"
+"#;
+    let tr = Translator::new(Catalog::from_po("ja", po).expect("test catalog parses"));
+    assert_eq!(
+        tr.translate("Car door in 13 seconds."),
+        "車のドア、13秒後。"
+    );
+}
+
+#[test]
+fn loose_holes_never_swallow_a_list_a_clause_or_a_stop() {
+    let po = r#"
+msgid ""
+msgstr ""
+"Language: ja\n"
+
+msgid "{rest} seconds"
+msgstr "{rest}秒"
+
+msgid "Ramp {side}, {when}."
+msgstr "ジャンプ台、{side}、{when}。"
+
+msgid "in {s} seconds"
+msgstr "{s}秒後"
+
+msgid "to your right"
+msgstr "右"
+
+msgid "{got_away} got away"
+msgstr "逃げられた{got_away}"
+
+msgid "{n} perfect"
+msgstr "パーフェクト{n}"
+
+msgid "{n} missed"
+msgstr "ミス{n}"
+
+msgid "Snowballs: {words}."
+msgstr "雪玉：{words}。"
+
+msgid "{name} on the {bike}"
+msgstr "{bike}で{name}"
+
+msgid "road bike"
+msgstr "ロードバイク"
+
+msgid "Downtown"
+msgstr "Downtown"
+"#;
+    let tr = Translator::new(Catalog::from_po("ja", po).expect("test catalog parses"));
+    assert_eq!(
+        tr.translate("Ramp to your right, in 2 seconds."),
+        "ジャンプ台、右、2秒後。"
+    );
+    assert_eq!(
+        tr.translate("Snowballs: 0 perfect, 0 missed, 10 got away."),
+        "雪玉：パーフェクト0、ミス0、逃げられた10。"
+    );
+    assert_eq!(
+        tr.translate("Downtown on the road bike."),
+        "ロードバイクでDowntown。"
+    );
+}

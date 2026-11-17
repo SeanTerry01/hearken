@@ -279,6 +279,22 @@ const MAX_DEPTH: usize = 6;
 
 /// How many lighter templates are tried for one that keeps no English
 /// once a template that keeps some has matched.
+/// Units a hole named after them counts: "{seconds} seconds".
+const COUNTED_UNITS: &[&str] = &[
+    "seconds",
+    "minutes",
+    "hours",
+    "days",
+    "weeks",
+    "metres",
+    "meters",
+    "miles",
+    "kilometres",
+    "kilometers",
+    "feet",
+    "points",
+];
+
 /// Holes that always hold a number.
 const COUNT_HOLES: &[&str] = &["n", "count", "number", "num", "total", "index"];
 
@@ -1371,10 +1387,47 @@ fn accepts(catalog: &Catalog, template: &Template, caps: &HashMap<&str, &str>) -
     // row is its position, not "{rank_words} of {name}".
     // A hole named for a count holds a number: "Night {n}" is never "Night
     // 1, over the chimney" with the words in {n}.
-    if caps
-        .iter()
-        .any(|(name, value)| COUNT_HOLES.contains(name) && !is_number(value))
-    {
+    if caps.iter().any(|(name, value)| {
+        (COUNT_HOLES.contains(name) || counts_its_unit(template, name)) && !is_number(value)
+    }) {
+        return false;
+    }
+    // A hole that ends the template never takes the stop of a short
+    // phrase: "{name} on the {name2}" is not {name2} = "road bike.", which
+    // the line's stop after "{name} on the {name2}" reads right.
+    let after_word = template.segs.len() >= 2
+        && matches!(&template.segs[template.segs.len() - 2],
+            Seg::Lit(text) if text.ends_with(' ') && text.trim_end().ends_with(char::is_alphabetic));
+    if let (true, Some(Seg::Hole(last))) = (after_word, template.segs.last()) {
+        if caps.get(last.as_str()).is_some_and(|value| {
+            let value = value.trim_end();
+            value.ends_with('.')
+                && !has_sentence_break(value)
+                && value.split_whitespace().count() <= 3
+        }) {
+            return false;
+        }
+    }
+    // A hole a word follows, as in "{got_away} got away", is a count of
+    // that word: never a list of counts, "0 perfect, 0 missed, 10".
+    if caps.iter().any(|(name, value)| {
+        before_word(template, name)
+            && value.contains(", ")
+            && value.trim_start().starts_with(|c: char| c.is_ascii_digit())
+    }) {
+        return false;
+    }
+    // Any hole before a unit is a short amount: "{rest} seconds" is not
+    // "Ramp to your right, in 2" seconds.
+    if caps.iter().any(|(name, value)| {
+        before_unit(template, name)
+            && (value.contains(", ")
+                || value
+                    .split_whitespace()
+                    .filter(|w| w.chars().any(char::is_alphabetic))
+                    .count()
+                    > 2)
+    }) {
         return false;
     }
     // Nor does any hole take a number and the clause after it: "Play,
@@ -1382,7 +1435,7 @@ fn accepts(catalog: &Catalog, template: &Template, caps: &HashMap<&str, &str>) -
     if caps.values().any(|value| {
         value
             .split_once(", ")
-            .is_some_and(|(head, rest)| is_number(head) && has_words(rest))
+            .is_some_and(|(head, rest)| is_number(head) && !is_number_list(rest))
     }) {
         return false;
     }
@@ -1490,6 +1543,47 @@ fn capitalize_first_letter(text: &str) -> String {
 }
 
 /// A number as the game writes one: "3", "1,250", "2.5", "3:15".
+/// The hole is followed by a word: "{got_away} got away".
+fn before_word(template: &Template, name: &str) -> bool {
+    template.segs.windows(2).any(|pair| match pair {
+        [Seg::Hole(hole), Seg::Lit(text)] if hole == name => text
+            .strip_prefix(' ')
+            .is_some_and(|text| text.starts_with(char::is_alphabetic)),
+        _ => false,
+    })
+}
+
+/// The hole is followed by a unit word: "{rest} seconds".
+fn before_unit(template: &Template, name: &str) -> bool {
+    template.segs.windows(2).any(|pair| match pair {
+        [Seg::Hole(hole), Seg::Lit(text)] if hole == name => text
+            .strip_prefix(' ')
+            .and_then(|text| text.split(|c: char| !c.is_alphabetic()).next())
+            .is_some_and(|word| COUNTED_UNITS.contains(&word)),
+        _ => false,
+    })
+}
+
+/// "{seconds} seconds" and "{hours} hours" count: the hole is followed
+/// by its own name as a word, so it holds a number, never "Car door in 13".
+fn counts_its_unit(template: &Template, name: &str) -> bool {
+    template.segs.windows(2).any(|pair| match pair {
+        [Seg::Hole(hole), Seg::Lit(text)] if hole == name => text
+            .trim_start()
+            .split(|c: char| !c.is_alphabetic())
+            .next()
+            .is_some_and(|word| word == name && COUNTED_UNITS.contains(&word)),
+        _ => false,
+    })
+}
+
+/// Numbers joined as a list: "6, 7 and 10" is pins, not a clause.
+fn is_number_list(text: &str) -> bool {
+    text.split(|c: char| !c.is_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .all(|word| word.chars().all(|c| c.is_ascii_digit()) || matches!(word, "and" | "or"))
+}
+
 fn is_number(text: &str) -> bool {
     text.chars().any(|c| c.is_ascii_digit())
         && text
