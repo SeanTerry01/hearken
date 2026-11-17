@@ -975,3 +975,65 @@ msgstr "Ninguno"
         "No queda ninguna por girar."
     );
 }
+
+#[test]
+fn a_run_of_sentences_the_catalog_has_whole_stays_together() {
+    let po = r#"
+msgid ""
+msgstr ""
+"Language: es\n"
+
+msgid "Next: {scene}. {number} of {count}."
+msgstr "Siguiente: {scene}. {number} de {count}."
+
+msgid "Learn to play"
+msgstr "Aprende a jugar"
+
+msgid "Escape for the list."
+msgstr "Escape para la lista."
+
+msgid "From now on, the wishes are quiet. Listen to each box."
+msgstr "A partir de ahora, los deseos callan. Escucha cada caja."
+
+msgid "Space starts the belt."
+msgstr "Space pone en marcha la cinta."
+"#;
+    let tr = Translator::new(Catalog::from_po("es", po).expect("test catalog parses"));
+    assert_eq!(
+        tr.translate("Next: Learn to play. 1 of 3. Escape for the list."),
+        "Siguiente: Aprende a jugar. 1 de 3. Escape para la lista."
+    );
+    assert_eq!(
+        tr.translate(
+            "Space starts the belt. From now on, the wishes are quiet. Listen to each box."
+        ),
+        "Space pone en marcha la cinta. A partir de ahora, los deseos callan. Escucha cada caja."
+    );
+}
+
+#[test]
+fn a_number_never_takes_the_full_stop_and_cjk_clauses_use_their_commas() {
+    let po = r#"
+msgid ""
+msgstr ""
+"Language: ja\n"
+
+msgid "Night {n}"
+msgstr "第{n}夜"
+
+msgid "The canoe slides out."
+msgstr "カヌーが滑り出します。"
+
+msgid "frogs"
+msgstr "カエル"
+
+msgid "crickets"
+msgstr "コオロギ"
+"#;
+    let tr = Translator::new(Catalog::from_po("ja", po).expect("test catalog parses"));
+    assert_eq!(
+        tr.translate("Night 1. The canoe slides out."),
+        "第1夜。カヌーが滑り出します。"
+    );
+    assert_eq!(tr.translate("Frogs, crickets"), "カエル、コオロギ");
+}

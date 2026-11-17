@@ -278,6 +278,9 @@ const MAX_DEPTH: usize = 6;
 
 /// How many lighter templates are tried for one that keeps no English
 /// once a template that keeps some has matched.
+/// The most sentences a catalog entry holds whole.
+const MAX_SENTENCE_GROUP: usize = 4;
+
 const MAX_LOOSER_TRIES: usize = 8;
 
 /// A rendered template match: its literal weight, the translated line, and
@@ -838,6 +841,13 @@ impl Pass<'_, '_> {
         if pieces.len() < 2 {
             return None;
         }
+        if !clauses {
+            return self.split_sentence_groups(core, &pieces, depth);
+        }
+        let cjk = matches!(
+            self.catalog.language.split('_').next().unwrap_or_default(),
+            "zh" | "ja"
+        );
         {
             let mut any = false;
             let mut whole = true;
@@ -866,6 +876,15 @@ impl Pass<'_, '_> {
                 let piece_out = translated.unwrap_or_else(|| (*piece).to_string());
                 let sep = if sep.trim().is_empty() && ends_full_width(&piece_out) {
                     ""
+                } else if clauses && cjk {
+                    // Chinese and Japanese mark a clause with their own
+                    // comma and colon: "カエル、コオロギ", not "カエル, コオロギ".
+                    match *sep {
+                        ", " => "\u{3001}",
+                        ": " => "\u{ff1a}",
+                        "; " => "\u{ff1b}",
+                        other => other,
+                    }
                 } else {
                     sep
                 };
@@ -880,6 +899,103 @@ impl Pass<'_, '_> {
             }
         }
         None
+    }
+
+    /// A run of sentences the catalog has whole, with or without the
+    /// full stop the line puts after it: "... over the garden" said as
+    /// "... over the garden. Up says ...".
+    fn whole_group(&mut self, group: &str, depth: usize) -> Option<String> {
+        if let Some(hit) = self.lookup(group, depth).filter(|hit| hit.kept.is_empty()) {
+            return Some(hit.out);
+        }
+        let bare = group.strip_suffix('.')?;
+        let hit = self.lookup(bare, depth).filter(|hit| hit.kept.is_empty())?;
+        Some(self.with_full_stop(hit.out))
+    }
+
+    /// Sentences, each translated, where a run of sentences the catalog
+    /// has whole is kept together: "Next: Belfry. 1 of 3. Escape for the
+    /// list." is the catalog's "Next: {scene}. {number} of {count}." and
+    /// then "Escape for the list.", not "1 of 3." left English.
+    fn split_sentence_groups(
+        &mut self,
+        core: &str,
+        pieces: &[(&str, &str)],
+        depth: usize,
+    ) -> Option<String> {
+        let n = pieces.len();
+        // Byte offset where each piece starts, and where it ends before its gap.
+        let base = core.as_ptr() as usize;
+        let start_of = |i: usize| pieces[i].0.as_ptr() as usize - base;
+        let end_of = |i: usize| start_of(i) + pieces[i].0.len();
+        // best[i]: (pieces left English, groups) for the first i pieces,
+        // and cut[i] the group that ends them: where it starts, its
+        // translation and the pieces it missed.
+        let mut best: Vec<Option<(usize, usize)>> = vec![None; n + 1];
+        let mut cut: HashMap<usize, (usize, Option<String>, Vec<String>)> = HashMap::new();
+        best[0] = Some((0, 0));
+        for i in 1..=n {
+            for j in (0..i).rev() {
+                if i - j > MAX_SENTENCE_GROUP || (j == 0 && i == n) {
+                    continue;
+                }
+                let Some((left, groups)) = best[j] else {
+                    continue;
+                };
+                let group = &core[start_of(j)..end_of(i - 1)];
+                let mut missed = Vec::new();
+                let out = if i - j == 1 {
+                    let mut inner = Pass {
+                        catalog: self.catalog,
+                        missed: &mut missed,
+                        memo: &mut *self.memo,
+                    };
+                    let out = inner.line(group, depth);
+                    if starts_lowercase(group) {
+                        out
+                    } else {
+                        out.map(|out| capitalize_first_letter(&out))
+                    }
+                } else {
+                    self.whole_group(group, depth)
+                };
+                if i - j > 1 && out.is_none() {
+                    continue;
+                }
+                let english = out.is_none() && has_words(group) && !is_name_like(group);
+                let score = (left + english as usize, groups + 1);
+                if best[i].is_none_or(|b| score < b) {
+                    best[i] = Some(score);
+                    cut.insert(i, (j, out, missed));
+                }
+            }
+        }
+        let mut cuts = Vec::new();
+        let mut i = n;
+        while i > 0 {
+            let (j, out, missed) = cut.remove(&i)?;
+            cuts.push((j, i, out, missed));
+            i = j;
+        }
+        cuts.reverse();
+        if cuts.iter().all(|c| c.2.is_none()) {
+            return None;
+        }
+        let mut out = String::new();
+        for (j, i, translated, missed) in cuts {
+            self.missed.extend(missed);
+            let piece_out =
+                translated.unwrap_or_else(|| core[start_of(j)..end_of(i - 1)].to_string());
+            let sep = pieces[i - 1].1;
+            let sep = if sep.trim().is_empty() && ends_full_width(&piece_out) {
+                ""
+            } else {
+                sep
+            };
+            out.push_str(&piece_out);
+            out.push_str(sep);
+        }
+        Some(out)
     }
 
     /// "Level 2 of 7: 19 crates of supplies from ... in Riverton,
@@ -1226,6 +1342,14 @@ fn accepts(catalog: &Catalog, template: &Template, caps: &HashMap<&str, &str>) -
     // "spades" is a word of its own, as a game builds a card name.
     // Numbers alone never fill one either: "2 of 2." after a menu
     // row is its position, not "{rank_words} of {name}".
+    // A number never takes the full stop that ends its sentence: "Night
+    // 1." is "Night {n}" with a stop after it, not {n} = "1.".
+    if caps
+        .values()
+        .any(|value| is_number(value) && value.trim_end().ends_with('.'))
+    {
+        return false;
+    }
     if template.numbers_only()
         && caps
             .iter()
