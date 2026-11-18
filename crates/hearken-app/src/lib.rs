@@ -35,6 +35,8 @@ pub mod speech_delivery;
 pub mod speech_hold;
 pub mod state;
 pub mod status_key;
+#[cfg(feature = "online")]
+pub mod sync;
 #[cfg(feature = "testing")]
 pub mod testing;
 pub mod text;
