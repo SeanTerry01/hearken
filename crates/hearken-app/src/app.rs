@@ -77,6 +77,7 @@ impl<G: Game> App<G> {
         self.ctx
             .update_reports(self.states.last().is_some_and(|s| s.allows_update_prompt()));
         self.ctx.speech.poll(dt);
+        self.ctx.follow_voice_language();
         self.ctx.update_audio();
         self.ctx.update_soundtrack();
         self.ctx.update_duck();

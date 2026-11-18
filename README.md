@@ -420,6 +420,17 @@ on one machine never share them. For a prefix of `MY_GAME`:
 | `MY_GAME_STREAM_TRANSCRIPT` | Print each spoken line to standard output. |
 | `MY_GAME_AUDIO_BACKEND` | `silent` turns sound off. |
 
+A game can also let players choose the main voice in its own settings.
+`SpeechSink::main_backend_options()` lists every voice that can speak right
+now, in the order automatic selection ranks them: a running screen reader,
+the system voices, Narrator only while it runs, and the built-in voice. It
+never lists the clipboard or the silent backend. Pass the chosen name to
+`select_main_backend`, or `None` for automatic. A chosen voice that cannot
+speak yet stays chosen: automatic selection speaks until the voice can,
+and the health check then switches to it. `MY_GAME_SPEECH_BACKEND` still
+comes first. When the event voice names the voice that is the main voice,
+events go through the main voice.
+
 ### Play and release with the hearken command
 
 [Getting started](#getting-started) installs the command. Besides

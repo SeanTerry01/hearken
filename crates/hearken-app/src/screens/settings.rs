@@ -116,6 +116,7 @@ fn step_speech_voice<G: Game>(ctx: &mut Ctx<G>, delta: i32) {
     };
     let n = voices.len() as i32 + 1;
     let next = (current as i32 + delta).rem_euclid(n) as usize;
+    let was_builtin = speech.self_voicing;
     if next == 0 {
         speech.self_voicing = false;
     } else {
@@ -123,6 +124,10 @@ fn step_speech_voice<G: Game>(ctx: &mut Ctx<G>, delta: i32) {
         speech.builtin_voice = voices[next - 1].to_string();
     }
     ctx.apply_speech_settings();
+    if ctx.settings.speech.self_voicing != was_builtin {
+        // Automatic follows the voice: English for the built-in one.
+        ctx.apply_language();
+    }
 }
 
 fn step_speech_volume<G: Game>(ctx: &mut Ctx<G>, delta: i32) {
