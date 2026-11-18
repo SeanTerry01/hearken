@@ -493,6 +493,14 @@ pub fn narrator_running() -> bool {
 /// Prism's registry name for its clipboard backend.
 const CLIPBOARD_BACKEND: &str = "Clipboard";
 
+/// Prism's registry name for its silent backend.
+const NO_SPEECH_BACKEND: &str = "No Speech";
+
+/// Backends the automatic pick never chooses; each still works when named.
+fn never_automatic(name: &str) -> bool {
+    name == CLIPBOARD_BACKEND || name == NO_SPEECH_BACKEND
+}
+
 fn name_of(ctx: &dyn VoiceRegistry, id: BackendId) -> String {
     ctx.name_of(id).unwrap_or_else(|| id.to_string())
 }
@@ -512,6 +520,8 @@ fn name_of(ctx: &dyn VoiceRegistry, id: BackendId) -> String {
 /// clipboard: it speaks nothing, ties `No Speech` at priority 0 ahead of it
 /// in registry order, and would overwrite whatever the player copied, so it
 /// is never chosen automatically; naming it as the override still works.
+/// `No Speech` is skipped the same way: at priority 0 (0.1.6 on) it outranks
+/// the built-in voice, so a machine with no other voice would go silent.
 /// Returns `None` when nothing on the machine can speak.
 pub fn pick_backend(
     ctx: &dyn VoiceRegistry,
@@ -558,7 +568,7 @@ pub fn pick_backend_gated(
             continue;
         };
         let name = name_of(ctx, backend_id);
-        if name == CLIPBOARD_BACKEND {
+        if never_automatic(&name) {
             continue;
         }
         let priority = if name == "UIA" {

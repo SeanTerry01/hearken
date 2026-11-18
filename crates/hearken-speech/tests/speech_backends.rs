@@ -19,6 +19,9 @@ fn runtime(supported: bool) -> VoiceFeatures {
     }
 }
 
+/// The built-in voice's priority: one below the Narrator route's last resort.
+const BUILTIN_PRIORITY: i32 = hearken_speech::UIA_LAST_RESORT_PRIORITY - 1;
+
 fn narrator_off() -> bool {
     false
 }
@@ -172,12 +175,30 @@ fn test_clipboard_is_never_chosen_automatically() {
         FakeVoice::new("Speech Dispatcher", 97, runtime(false)),
         FakeVoice::new("Clipboard", 0, SPEAKING),
         FakeVoice::new("No Speech", 0, SPEAKING),
+        FakeVoice::new("Genny", BUILTIN_PRIORITY, SPEAKING),
     ]);
-    assert_eq!(picked_name(&ctx, None).as_deref(), Some("No Speech"));
+    assert_eq!(picked_name(&ctx, None).as_deref(), Some("Genny"));
     assert_eq!(
         picked_name(&ctx, Some("Clipboard")).as_deref(),
         Some("Clipboard")
     );
+}
+
+#[test]
+fn test_no_speech_is_never_chosen_automatically() {
+    // Prism 0.1.6 registers No Speech at priority 0, above the built-in
+    // voice. Picked automatically, a machine with nothing else goes silent.
+    let ctx = FakeRegistry::new(vec![
+        FakeVoice::new("No Speech", 0, SPEAKING),
+        FakeVoice::new("Genny", BUILTIN_PRIORITY, SPEAKING),
+    ]);
+    assert_eq!(picked_name(&ctx, None).as_deref(), Some("Genny"));
+    assert_eq!(
+        picked_name(&ctx, Some("No Speech")).as_deref(),
+        Some("No Speech")
+    );
+    let alone = FakeRegistry::new(vec![FakeVoice::new("No Speech", 0, SPEAKING)]);
+    assert!(picked_name(&alone, None).is_none());
 }
 
 #[test]
