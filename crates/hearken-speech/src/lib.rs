@@ -273,6 +273,15 @@ pub trait SpeechSink {
         Vec::new()
     }
 
+    /// Whether every voice change asked for so far (`configure`, the main
+    /// and event voice selections) has run, so the queries answer for the
+    /// voices it chose. Never waits. A sink that runs changes as they are
+    /// asked for is always settled; the threaded sink is not until its
+    /// worker has run and published them.
+    fn settled(&self) -> bool {
+        true
+    }
+
     /// Installed voice names from the first backend that lets us pick one;
     /// empty when none does.
     fn voice_names(&self) -> Vec<String>;

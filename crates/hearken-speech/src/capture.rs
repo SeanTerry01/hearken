@@ -136,6 +136,13 @@ pub struct CaptureSpeech {
     /// What `event_voice_report` answers; `None` until a test scripts it.
     voice_speaking: Option<bool>,
     voice_reports: u32,
+    /// Stand in for the speech worker: voice changes wait for
+    /// [`CaptureSpeech::step_worker`].
+    worker_lag: bool,
+    /// A voice change is waiting for `step_worker`.
+    unsettled: bool,
+    /// The profile the next voice change brings.
+    staged: Option<CaptureProfile>,
 }
 
 impl Default for CaptureSpeech {
@@ -177,6 +184,44 @@ impl CaptureSpeech {
             shutdown_calls: 0,
             voice_speaking: None,
             voice_reports: 0,
+            worker_lag: false,
+            unsettled: false,
+            staged: None,
+        }
+    }
+
+    /// Answer as `profile` from now on: a voice coming or going outside
+    /// the game.
+    pub fn set_profile(&mut self, profile: CaptureProfile) {
+        self.profile = profile;
+    }
+
+    /// The profile the capture answers with once the next voice change
+    /// (`configure`, either voice selection) has run.
+    pub fn stage_profile(&mut self, profile: CaptureProfile) {
+        self.staged = Some(profile);
+    }
+
+    /// Stand in for the threaded sink's worker: while on, a voice change
+    /// leaves the capture unsettled, still answering from before it, until
+    /// [`Self::step_worker`].
+    pub fn set_worker_lag(&mut self, on: bool) {
+        self.worker_lag = on;
+    }
+
+    /// Run the voice changes waiting under worker lag.
+    pub fn step_worker(&mut self) {
+        self.unsettled = false;
+        if let Some(profile) = self.staged.take() {
+            self.profile = profile;
+        }
+    }
+
+    fn voice_change(&mut self) {
+        if self.worker_lag {
+            self.unsettled = true;
+        } else {
+            self.step_worker();
         }
     }
 
@@ -473,6 +518,11 @@ impl SpeechSink for CaptureSpeech {
 
     fn select_event_backend(&mut self, name: Option<&str>) {
         self.event_pref = name.filter(|name| !name.is_empty()).map(str::to_string);
+        self.voice_change();
+    }
+
+    fn settled(&self) -> bool {
+        !self.unsettled
     }
 
     fn main_backend_options(&self) -> Vec<String> {
@@ -483,6 +533,7 @@ impl SpeechSink for CaptureSpeech {
         let name = name.filter(|name| !name.is_empty()).map(str::to_string);
         self.main_selections.push(name.clone());
         self.main_pref = name;
+        self.voice_change();
     }
 
     fn set_braille_only(&mut self, _on: bool) {
@@ -507,6 +558,7 @@ impl SpeechSink for CaptureSpeech {
     ) {
         self.configure_calls
             .push((rate, pitch, volume, voice.map(str::to_string)));
+        self.voice_change();
     }
 
     fn say_adjustment_preview(&mut self, setting: &str, text: &str, interrupt: bool) -> bool {
@@ -651,6 +703,9 @@ impl SpeechSink for SharedCapture {
     }
     fn main_backend_options(&self) -> Vec<String> {
         self.0.borrow().main_backend_options()
+    }
+    fn settled(&self) -> bool {
+        self.0.borrow().settled()
     }
     fn select_main_backend(&mut self, name: Option<&str>) {
         self.0.borrow_mut().select_main_backend(name)
