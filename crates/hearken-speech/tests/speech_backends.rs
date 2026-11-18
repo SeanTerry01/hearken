@@ -974,6 +974,30 @@ fn main_backend_options_rank_usable_voices_like_the_automatic_pick() {
 }
 
 #[test]
+fn main_backend_options_are_registry_names() {
+    // The macOS VoiceOver stand-in registers as "VoiceOver" and calls
+    // itself "VoiceOver (macOS)". The option must be the name a saved
+    // choice is looked up by, and choosing it must bind that voice.
+    let ctx = FakeRegistry::new(vec![
+        FakeVoice::renamed("VoiceOver", "VoiceOver (macOS)", 100, SPEAKING),
+        FakeVoice::new("AVSpeech", 90, ADJUSTABLE),
+    ]);
+    assert_eq!(
+        main_backend_options(&ctx, narrator_off),
+        vec!["VoiceOver", "AVSpeech"]
+    );
+    let mut s = Speech::with_registry(Box::new(ctx), None);
+    assert_eq!(s.main_backend_options(), vec!["VoiceOver", "AVSpeech"]);
+    s.select_main_backend(Some("AVSpeech"));
+    assert_eq!(s.backend_name(), "AVSpeech");
+    s.select_main_backend(Some("VoiceOver"));
+    assert_eq!(s.backend_name(), "VoiceOver (macOS)");
+    // A probe keeps it: nothing to switch.
+    assert!(!s.refresh());
+    assert_eq!(s.backend_name(), "VoiceOver (macOS)");
+}
+
+#[test]
 fn main_backend_options_do_not_depend_on_the_bound_voice() {
     let ctx = every_kind_registry();
     let on_nvda = speech_on(&ctx, "NVDA");

@@ -456,8 +456,14 @@ impl SpeechSink for Speech {
             let Ok(backend) = ctx.acquire(backend_id) else {
                 continue;
             };
-            let name = backend.name();
-            if name == main_name || never_automatic(&name) || !usable(backend.as_ref()) {
+            // Registry names, like the main voice options: the name a
+            // saved choice is looked up by.
+            let name = ctx.name_of(backend_id).unwrap_or_else(|| backend.name());
+            if name == main_name
+                || backend.name() == main_name
+                || never_automatic(&name)
+                || !usable(backend.as_ref())
+            {
                 continue;
             }
             let features = backend.features();

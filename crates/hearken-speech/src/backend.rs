@@ -616,15 +616,19 @@ fn ranked_candidates(ctx: &dyn VoiceRegistry, narrator: bool) -> Vec<BackendId> 
 }
 
 /// Every backend that can be the main voice right now, by registry name, in
-/// the order the automatic pick ranks them. Never `Clipboard` or
+/// the order the automatic pick ranks them. The registry name, not the
+/// voice's own: the macOS VoiceOver stand-in registers as `VoiceOver` but
+/// names itself `VoiceOver (macOS)`, and only the first finds it again. Never `Clipboard` or
 /// `No Speech`; `UIA` only while Narrator runs. Independent of which voice
 /// is bound.
 pub fn main_backend_options(ctx: &dyn VoiceRegistry, narrator_probe: fn() -> bool) -> Vec<String> {
     ranked_candidates(ctx, narrator_probe())
         .into_iter()
-        .filter_map(|backend_id| ctx.acquire(backend_id).ok())
-        .filter(|backend| usable(backend.as_ref()))
-        .map(|backend| backend.name())
+        .filter(|&backend_id| {
+            ctx.acquire(backend_id)
+                .is_ok_and(|backend| usable(backend.as_ref()))
+        })
+        .map(|backend_id| name_of(ctx, backend_id))
         .collect()
 }
 
