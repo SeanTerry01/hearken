@@ -20,6 +20,9 @@ pub mod menu;
 #[cfg(feature = "online")]
 pub mod online;
 pub mod paths;
+pub mod phase;
+#[cfg(feature = "report")]
+pub mod reports;
 pub mod run;
 pub mod screens;
 pub mod sdl_shell;
@@ -29,7 +32,11 @@ pub mod single_instance;
 pub mod sound;
 pub mod soundtrack;
 pub mod speech_delivery;
+pub mod speech_hold;
 pub mod state;
+pub mod status_key;
+#[cfg(feature = "online")]
+pub mod sync;
 #[cfg(feature = "testing")]
 pub mod testing;
 pub mod text;
@@ -42,7 +49,7 @@ pub use bindings::{Action, Chord, KeyBindings, NoAction, PadChord};
 pub use clock::LocalTime;
 pub use commentary::{Commentary, Line};
 pub use controller::{ControllerManager, InputDevice};
-pub use ctx::{Ctx, TRANSCRIPT_CAP, TRANSCRIPT_TARGET};
+pub use ctx::{Ctx, CHANGES_CAP, PHASE_TARGET, SCREENS_TARGET, TRANSCRIPT_CAP, TRANSCRIPT_TARGET};
 pub use discord::{Discord, DiscordConfig, Presence};
 pub use game::Game;
 pub use hearken_audio as audio;
@@ -51,9 +58,14 @@ pub use hearken_audio::KiraBackend;
 pub use hearken_audio::{
     Audio, Backend, BackendError, Bus, Call, Channel, ClipSource, Fades, LayeredClips, Listener,
     LiveSound, LoopRegion, LooseClips, MadeClips, MemoryClips, Mix, Recorder, RecordingBackend,
-    SilentBackend, Sound, Source, SpatialConfig, Vec3,
+    SilentBackend, Sound, Source, SpatialConfig, Take, TakeEvent, TakeState, Vec3,
 };
 pub use hearken_l10n as l10n;
+/// Problem reports, without the engine: the report, its limits, sending.
+#[cfg(feature = "report")]
+pub use hearken_report as report;
+#[cfg(feature = "online")]
+pub use hearken_rooms as rooms;
 pub use hearken_seal as seal;
 pub use hearken_seal::{Opened, Tamper, Vault};
 pub use hearken_speech::{
@@ -68,20 +80,26 @@ pub use input::{controller_key_map, ControllerAxis, ControllerButton, InputEvent
 #[cfg(feature = "online")]
 pub use online::{Connect, Online, OnlineConfig, OnlineError, Plan, Ticket};
 pub use paths::Paths;
+pub use phase::{Phase, Phases};
+#[cfg(feature = "report")]
+pub use reports::{ReportConfig, Reports};
 pub use run::{already_running_line, run};
 pub use screens::SettingsRow;
 pub use sdl_shell::SdlShell;
 pub use settings::{
     default_volume, AudioSettings, ControllerSettings, DiscordSettings, MenuSettings,
-    OnlineSettings, Settings, UpdateSettings,
+    OnlineSettings, ReportSettings, Settings, UpdateSettings,
 };
 pub use shell::{HeadlessShell, Shell, FRAME_SECONDS};
 pub use sound::{SoundConfig, UiSound, UiSounds, BUS_LABELS};
 pub use soundtrack::{
-    Performer, Piece, Soundtrack, SoundtrackScreen, Stems, Track, Variation, Variety,
+    Performer, Piece, Replay, Soundtrack, SoundtrackScreen, Stems, TakePerformer, Track, Variation,
+    Variety,
 };
 pub use speech_delivery::SayEvent;
+pub use speech_hold::{SpeechHold, SpeechHoldState};
 pub use state::{Reveal, StackOp, State};
+pub use status_key::StatusKey;
 #[cfg(feature = "testing")]
 pub use testing::Headless;
 #[cfg(feature = "update")]

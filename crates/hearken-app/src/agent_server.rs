@@ -17,6 +17,11 @@
 //! reply at once for timing-critical play), `hold`, `release`, `wait`,
 //! `wait_for`, `lockstep`, `record_start`, `record_stop` and `quit_game`.
 //!
+//! `screen` also names the top screen's phase (`State::phase`) and the
+//! whole stack, and a recording's log carries every screen and phase change
+//! (`Ctx::changes`) beside what was said. Neither reaches `listen`: an
+//! agent plays by ear, and inspects when it needs to explain something.
+//!
 //! `lockstep` (on) holds game time still between tool calls, the way
 //! Freight Fate's does. An agent's round trip takes seconds, longer than
 //! most reaction windows; in lockstep the game waits while it thinks, so a
@@ -68,6 +73,13 @@ const MAX_WAIT_SECONDS: f64 = 300.0;
 const PRESS_SETTLE_SECONDS: f64 = 0.6;
 /// Presses one `press` call may make.
 const MAX_REPEAT: u32 = 50;
+/// How long a `record_start` waits for the sound device to finish opening,
+/// so a recording made as the first call still has sound.
+const AUDIO_OPEN_WAIT_SECONDS: f64 = 5.0;
+
+/// The key argument's description, and the hint an unknown key gets back.
+/// Punctuation goes by name, never by its character.
+const KEY_NAMES: &str = "A key as the settings file names it, with optional ctrl+, alt+, shift+. Names: a-z, 0-9, f1-f12, enter, escape, space, tab, backspace, up, down, left, right, home, end, page_up, page_down, insert, delete, kp_0-kp_9, kp_enter, kp_plus, kp_minus, and punctuation by name: comma, period, slash, backslash, semicolon, apostrophe, grave, minus, equals, plus, left_bracket, right_bracket. E.g. \"ctrl+up\", \"shift+apostrophe\".";
 
 /// Whether this run was asked to be an agent server: a debug build only,
 /// launched with `--agent-server`. A release build never starts it, even
@@ -127,10 +139,10 @@ enum Msg {
 }
 
 fn tools() -> Value {
-    let key = json!({ "type": "string", "description": "A key as the settings file names it, with optional ctrl+, alt+, shift+: enter, escape, up, down, left, right, space, tab, a-z, 0-9, f1-f12, page_up, home, ... e.g. \"ctrl+up\"." });
+    let key = json!({ "type": "string", "description": KEY_NAMES });
     json!([
         { "name": "listen", "description": "Everything said (and every sound started) since the last call, without touching the game.", "inputSchema": { "type": "object", "properties": {} } },
-        { "name": "screen", "description": "Inspector, not ears: the top screen's name and its text lines. Record anything you needed here that was never spoken.", "inputSchema": { "type": "object", "properties": {} } },
+        { "name": "screen", "description": "Inspector, not ears: the top screen's name, its phase when it has one, the screen stack and its text lines. Record anything you needed here that was never spoken.", "inputSchema": { "type": "object", "properties": {} } },
         { "name": "press", "description": "Press and release a key (times: repeat count, default 1), then return what was heard. settle: seconds to keep listening after the key comes up (default 0.6; 0 replies at once, for timing-critical play).", "inputSchema": { "type": "object", "properties": { "key": key, "times": { "type": "integer", "minimum": 1, "maximum": MAX_REPEAT }, "settle": { "type": "number", "minimum": 0, "maximum": MAX_WAIT_SECONDS } }, "required": ["key"] } },
         { "name": "hold", "description": "Hold a key down until release.", "inputSchema": { "type": "object", "properties": { "key": key }, "required": ["key"] } },
         { "name": "release", "description": "Let a held key go.", "inputSchema": { "type": "object", "properties": { "key": key }, "required": ["key"] } },
@@ -145,7 +157,8 @@ fn tools() -> Value {
 
 fn parse_chord(args: &Value) -> Result<Chord, String> {
     let name = args["key"].as_str().ok_or("key is required")?;
-    Chord::parse(&name.trim().to_ascii_lowercase()).ok_or_else(|| format!("unknown key: {name}"))
+    Chord::parse(&name.trim().to_ascii_lowercase())
+        .ok_or_else(|| format!("unknown key: {name}. {KEY_NAMES}"))
 }
 
 fn seconds(args: &Value, default: f64) -> f64 {
@@ -274,6 +287,8 @@ pub struct AgentServer {
     heard: heard::Heard,
     /// `Ctx::said` when last read.
     said: u64,
+    /// `Ctx::changed` when last read.
+    changed: u64,
     recording: Option<record::Recording>,
     /// Hold game time still between calls.
     lockstep: bool,
@@ -315,6 +330,7 @@ impl AgentServer {
             job: None,
             heard: heard::Heard::default(),
             said: 0,
+            changed: 0,
             recording: None,
             lockstep: false,
             wall: 0.0,
@@ -396,6 +412,18 @@ impl AgentServer {
                     return true;
                 }
             }
+            // A recording waiting on the sound device: it needs real time,
+            // not game time, so lockstep stays held while it waits.
+            if let Ask::RecordStart(path) = &job.ask {
+                if app.ctx.audio.opening() && job.left > 0.0 {
+                    job.left -= dt;
+                    return false;
+                }
+                let path = path.clone();
+                let job = self.job.take().expect("a job is running");
+                self.record_start(app, &job.id, path.as_deref());
+                continue;
+            }
             // Judged before this frame runs, so the reply carries every
             // line the waited time produced, and in lockstep no time passes
             // after it.
@@ -445,6 +473,10 @@ impl AgentServer {
             Ask::Listen => job.left = 0.0,
             Ask::Screen => {
                 let mut text = format!("screen: {}", app.top_name());
+                if let Some(phase) = app.top_phase() {
+                    text.push_str(&format!(", phase: {phase}"));
+                }
+                text.push_str(&format!("\nstack: {}", app.stack_names().join(" > ")));
                 for line in app.top_lines() {
                     text.push('\n');
                     text.push_str(&line);
@@ -468,18 +500,14 @@ impl AgentServer {
                 return None;
             }
             Ask::RecordStart(path) => {
-                let (text, failed) = if self.recording.is_some() {
-                    ("already recording; record_stop first".to_string(), true)
-                } else {
-                    match record::Recording::start(&mut app.ctx, path.as_deref(), self.wall) {
-                        Ok((rec, text)) => {
-                            self.recording = Some(rec);
-                            (text, false)
-                        }
-                        Err(e) => (e, true),
-                    }
-                };
-                reply(&self.out, &job.id, text, failed);
+                // The sound device opens on its own thread after the game
+                // window does; a recording started before it is ready
+                // would have no sound, so wait for it (see `step`).
+                if app.ctx.audio.opening() && self.recording.is_none() {
+                    job.left = AUDIO_OPEN_WAIT_SECONDS;
+                    return Some(job);
+                }
+                self.record_start(app, &job.id, path.as_deref());
                 return None;
             }
             Ask::RecordStop => {
@@ -508,13 +536,36 @@ impl AgentServer {
         Some(job)
     }
 
+    /// Starts a recording and replies to the call that asked for it.
+    fn record_start<G: Game>(&mut self, app: &mut App<G>, id: &Value, path: Option<&str>) {
+        let (text, failed) = if self.recording.is_some() {
+            ("already recording; record_stop first".to_string(), true)
+        } else {
+            match record::Recording::start(&mut app.ctx, path, self.wall) {
+                Ok((rec, text)) => {
+                    self.recording = Some(rec);
+                    (text, false)
+                }
+                Err(e) => (e, true),
+            }
+        };
+        reply(&self.out, id, text, failed);
+    }
+
     fn gather<G: Game>(&mut self, app: &mut App<G>) {
         let ctx = &mut app.ctx;
         let new = (ctx.said - self.said).min(ctx.transcript.len() as u64) as usize;
         self.said = ctx.said;
         let start = ctx.transcript.len() - new;
         let sounds = ctx.audio.take_heard();
+        let new_changes = (ctx.changed - self.changed).min(ctx.changes.len() as u64) as usize;
+        self.changed = ctx.changed;
         if let Some(rec) = &mut self.recording {
+            // Screen and phase changes go to the log, never to the agent's
+            // ears: `listen` stays what a player hears, `screen` inspects.
+            for line in &ctx.changes[ctx.changes.len() - new_changes..] {
+                rec.change(self.wall, line);
+            }
             for line in &ctx.transcript[start..] {
                 rec.said(self.wall, line);
             }
@@ -635,246 +686,5 @@ mod tests {
     }
 }
 
-/// The server driven end to end over a pipe, against a headless game with
-/// a reaction window.
 #[cfg(all(test, feature = "testing"))]
-mod lockstep_tests {
-    use super::*;
-    use crate::ctx::Ctx;
-    use crate::shell::FRAME_SECONDS;
-    use crate::state::State;
-    use crate::testing::Headless;
-    use std::io::PipeWriter;
-    use std::time::{Duration, Instant};
-
-    struct Reflex;
-
-    impl Game for Reflex {
-        const TITLE: &'static str = "Reflex";
-        const DATA_DIR: &'static str = "HearkenReflexTest";
-        const ENV_PREFIX: &'static str = "HEARKEN_REFLEX_TEST";
-        type Event = ();
-        type Data = ();
-        type Settings = ();
-        type Action = crate::bindings::NoAction;
-        type Category = hearken_speech::NoCategory;
-    }
-
-    /// "Now!" after half a second, then a third of a second to press space.
-    #[derive(Default)]
-    struct Window {
-        clock: f64,
-        over: bool,
-    }
-
-    const CUE_AT: f64 = 0.5;
-    const WINDOW: f64 = 0.3;
-
-    impl State<Reflex> for Window {
-        fn name(&self) -> &'static str {
-            "window"
-        }
-        fn help(&self, _ctx: &Ctx<Reflex>) -> String {
-            String::new()
-        }
-        fn update(&mut self, ctx: &mut Ctx<Reflex>, dt: f64) {
-            if self.over {
-                return;
-            }
-            let before = self.clock;
-            self.clock += dt;
-            if before < CUE_AT && self.clock >= CUE_AT {
-                ctx.say("Now!");
-            }
-            if self.clock >= CUE_AT + WINDOW {
-                self.over = true;
-                ctx.say("Missed.");
-            }
-        }
-        fn handle_input(&mut self, ctx: &mut Ctx<Reflex>, event: &InputEvent) {
-            if !self.over && event.pressed() == Some(Key::Space) {
-                self.over = true;
-                ctx.say(if self.clock >= CUE_AT {
-                    "Hit!"
-                } else {
-                    "Too soon."
-                });
-            }
-        }
-    }
-
-    /// What the server writes, kept for the test to read.
-    #[derive(Clone, Default)]
-    struct Sink(Arc<Mutex<Vec<u8>>>);
-
-    impl Write for Sink {
-        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-            self.0.lock().unwrap().extend_from_slice(buf);
-            Ok(buf.len())
-        }
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-
-    impl Sink {
-        fn replies(&self) -> Vec<Value> {
-            String::from_utf8_lossy(&self.0.lock().unwrap())
-                .lines()
-                .filter_map(|l| serde_json::from_str(l).ok())
-                .collect()
-        }
-    }
-
-    struct Session {
-        game: Headless<Reflex>,
-        agent: AgentServer,
-        to_server: PipeWriter,
-        sink: Sink,
-        next_id: u64,
-    }
-
-    fn call_line(id: u64, name: &str, args: Value) -> String {
-        format!(
-            "{}\n",
-            json!({ "jsonrpc": "2.0", "id": id, "method": "tools/call", "params": { "name": name, "arguments": args } })
-        )
-    }
-
-    impl Session {
-        /// The game opens on the first call, as a real session does.
-        fn open(name: &str, args: Value) -> (Session, String) {
-            let (from_client, mut to_server) = std::io::pipe().unwrap();
-            let sink = Sink::default();
-            to_server
-                .write_all(call_line(1, name, args).as_bytes())
-                .unwrap();
-            let agent = AgentServer::over(
-                Box::new(BufReader::new(from_client)),
-                Box::new(sink.clone()),
-            )
-            .expect("the first call opens the game");
-            let mut session = Session {
-                game: Headless::new((), Window::default()),
-                agent,
-                to_server,
-                sink,
-                next_id: 2,
-            };
-            session.agent.attach(&mut session.game.app);
-            let text = session.until_reply(1);
-            (session, text)
-        }
-
-        /// One frame of the real loop: the server, then the game.
-        fn frame(&mut self) {
-            let mut events = Vec::new();
-            let dt = self
-                .agent
-                .frame(&mut self.game.app, &mut events, FRAME_SECONDS);
-            self.game.app.step(events, dt);
-        }
-
-        /// Frames with no call in flight: an agent thinking.
-        fn think(&mut self, seconds: f64) {
-            for _ in 0..(seconds / FRAME_SECONDS).round() as u32 {
-                self.frame();
-            }
-        }
-
-        fn until_reply(&mut self, id: u64) -> String {
-            let deadline = Instant::now() + Duration::from_secs(10);
-            loop {
-                if let Some(r) = self.sink.replies().into_iter().find(|r| r["id"] == id) {
-                    return r["result"]["content"][0]["text"]
-                        .as_str()
-                        .unwrap_or_default()
-                        .to_string();
-                }
-                assert!(Instant::now() < deadline, "no reply to call {id}");
-                // Let the serve thread hand the call over before a frame
-                // runs, so a frame never passes waiting for the pipe.
-                std::thread::sleep(Duration::from_millis(2));
-                self.frame();
-            }
-        }
-
-        fn call(&mut self, name: &str, args: Value) -> String {
-            let id = self.next_id;
-            self.next_id += 1;
-            self.to_server
-                .write_all(call_line(id, name, args).as_bytes())
-                .unwrap();
-            // The call is on its way; give it time to reach the channel so
-            // no frame runs on the wall clock while it travels.
-            std::thread::sleep(Duration::from_millis(20));
-            self.until_reply(id)
-        }
-
-        fn clock(&self) -> f64 {
-            self.game.app.ctx.clock
-        }
-    }
-
-    #[test]
-    fn in_lockstep_a_slow_agent_still_answers_a_cue_in_time() {
-        let (mut s, text) = Session::open("lockstep", json!({ "on": true }));
-        assert!(text.starts_with("Lockstep is on"), "{text}");
-        assert!(s
-            .call("wait_for", json!({ "text": "now", "seconds": 5 }))
-            .contains("Now!"));
-        // Three seconds of thinking, ten times the window.
-        let held = s.clock();
-        s.think(3.0);
-        assert_eq!(s.clock(), held, "game time held still between calls");
-        let text = s.call("press", json!({ "key": "space", "settle": 0 }));
-        assert!(text.contains("Hit!"), "{text}");
-        // A press with settle 0 takes its two frames and no more.
-        assert!((s.clock() - held - 2.0 * FRAME_SECONDS).abs() < 1e-9);
-    }
-
-    #[test]
-    fn without_lockstep_the_same_agent_is_too_late() {
-        let (mut s, _) = Session::open("listen", json!({}));
-        assert!(s
-            .call("wait_for", json!({ "text": "now", "seconds": 5 }))
-            .contains("Now!"));
-        s.think(3.0);
-        let text = s.call("press", json!({ "key": "space", "settle": 0 }));
-        assert!(!text.contains("Hit!"), "{text}");
-        assert!(s.game.app.ctx.transcript.iter().any(|l| l == "Missed."));
-    }
-
-    #[test]
-    fn a_wait_in_lockstep_runs_its_time_and_then_holds() {
-        let (mut s, _) = Session::open("lockstep", json!({ "on": true }));
-        let start = s.clock();
-        s.call("wait", json!({ "seconds": 0.25 }));
-        let after = s.clock();
-        assert!(
-            (after - start - 0.25).abs() < FRAME_SECONDS,
-            "ran {}",
-            after - start
-        );
-        s.think(1.0);
-        assert_eq!(s.clock(), after);
-        // Off again, the game runs between calls.
-        s.call("lockstep", json!({ "on": false }));
-        s.think(0.5);
-        assert!(s.clock() > after + 0.4);
-    }
-
-    #[test]
-    fn a_person_can_still_play_while_the_game_is_held() {
-        let (mut s, _) = Session::open("lockstep", json!({ "on": true }));
-        s.call("wait_for", json!({ "text": "now", "seconds": 5 }));
-        let held = s.clock();
-        // A key from the window lands on a held frame.
-        let mut events = vec![InputEvent::key(Key::Space)];
-        let dt = s.agent.frame(&mut s.game.app, &mut events, FRAME_SECONDS);
-        assert_eq!(dt, 0.0);
-        s.game.app.step(events, dt);
-        assert_eq!(s.clock(), held);
-        assert!(s.game.app.ctx.transcript.iter().any(|l| l == "Hit!"));
-    }
-}
+mod session_tests;

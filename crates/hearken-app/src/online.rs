@@ -35,6 +35,9 @@ pub struct OnlineConfig {
     /// Whether players can play as guests, with no account: the server
     /// names them from word lists (`activate/guest`).
     pub guests: bool,
+    /// Whether the server has rooms for play between players (`rooms/`),
+    /// so `ctx.rooms` and the Online play screens are offered.
+    pub rooms: bool,
 }
 
 impl OnlineConfig {
@@ -43,12 +46,20 @@ impl OnlineConfig {
             url: url.into(),
             site: site.into(),
             guests: false,
+            rooms: false,
         }
     }
 
     /// Lets players play as guests, with no account.
     pub fn with_guests(mut self) -> Self {
         self.guests = true;
+        self
+    }
+
+    /// Offers play between players through the server's rooms
+    /// (`ctx.rooms`); the server must have a rooms store and room kinds.
+    pub fn with_rooms(mut self) -> Self {
+        self.rooms = true;
         self
     }
 
@@ -103,7 +114,8 @@ pub trait Transport: Send + Sync + 'static {
 }
 
 /// The longest answer read from a server.
-pub const MAX_REPLY_BYTES: u64 = 256 * 1024;
+/// Big enough for a synced file (`saves/<name>`), a megabyte before base64.
+pub const MAX_REPLY_BYTES: u64 = 2 * 1024 * 1024;
 
 /// HTTPS through ureq. Redirects are not followed, so a token is only ever
 /// sent to the URL the game names.
@@ -248,6 +260,14 @@ pub enum OnlineError {
     },
     /// The code expired before the player entered it.
     CodeExpired,
+}
+
+/// "a" or "an" before a site's name: "an orinks.net account".
+pub fn article(site: &str) -> &'static str {
+    match site.chars().next().map(|c| c.to_ascii_lowercase()) {
+        Some('a' | 'e' | 'i' | 'o' | 'u') => "an",
+        _ => "a",
+    }
 }
 
 impl OnlineError {
@@ -452,6 +472,17 @@ impl Online {
         self.transport = transport;
     }
 
+    /// Holds `token` as `name`'s, as a test of a screen does in place of
+    /// connecting.
+    #[cfg(any(test, feature = "testing"))]
+    #[doc(hidden)]
+    pub fn hold_account(&mut self, token: &str, name: &str) {
+        self.token = Some(Secret(token.to_string()));
+        self.name = Some(name.to_string());
+        self.guest = false;
+        self.token_gen += 1;
+    }
+
     /// Whether the game has a server.
     pub fn is_offered(&self) -> bool {
         self.config.is_some()
@@ -470,6 +501,16 @@ impl Online {
     /// The name the server knows the player by.
     pub fn player_name(&self) -> Option<&str> {
         self.name.as_deref()
+    }
+
+    /// Whether the server has rooms for play between players.
+    pub fn offers_rooms(&self) -> bool {
+        self.config.as_ref().is_some_and(|c| c.rooms)
+    }
+
+    /// The bearer token held, for `ctx.rooms` to send with its requests.
+    pub(crate) fn token(&self) -> Option<&str> {
+        self.token.as_ref().map(|t| t.0.as_str())
     }
 
     /// Whether the server lets players play as guests.
@@ -540,6 +581,68 @@ impl Online {
         }
         let url = config.endpoint(path);
         let token = self.token.clone();
+        Ok(self.get(url, token))
+    }
+
+    /// Asks for the newest copy of the synced file `name` kept with the
+    /// account (`GET saves/<name>/head`): `{ account, save: { revision,
+    /// hash, bytes, format, at } | null }`. Needs an account. See
+    /// [`crate::sync`], which drives these three calls.
+    pub fn save_head(&mut self, name: &str) -> Result<Ticket, OnlineError> {
+        self.save_get(&format!("saves/{name}/head"), name)
+    }
+
+    /// Downloads the newest copy of `name` (`GET saves/<name>`):
+    /// `{ revision, hash, format, content }`, `content` in base64.
+    pub fn save_download(&mut self, name: &str) -> Result<Ticket, OnlineError> {
+        self.save_get(&format!("saves/{name}"), name)
+    }
+
+    /// Uploads `content` (already sealed) as the next revision of `name`,
+    /// made from revision `base` (0 for none). The server refuses it as
+    /// `Refused { code: "stale" }` when the account has a newer revision.
+    pub fn save_upload(
+        &mut self,
+        name: &str,
+        base: u64,
+        format: u32,
+        content: &[u8],
+        card: Option<Value>,
+    ) -> Result<Ticket, OnlineError> {
+        let config = self.config.clone().ok_or(OnlineError::NotOffered)?;
+        if !valid_kind(name) {
+            return Err(OnlineError::BadKind);
+        }
+        let token = self.token.clone().ok_or(OnlineError::NotConnected)?;
+        if self.in_flight.len() >= MAX_IN_FLIGHT {
+            return Err(OnlineError::Busy);
+        }
+        let mut body = json!({
+            "base": base,
+            "format": format,
+            "hash": crate::sync::sha256_hex(content),
+            "content": crate::sync::base64(content),
+        });
+        if let Some(card) = card {
+            body["card"] = card;
+        }
+        let url = config.endpoint(&format!("saves/{name}"));
+        Ok(self.send(url, token, Body::Json(body), Answer::Whole))
+    }
+
+    fn save_get(&mut self, path: &str, name: &str) -> Result<Ticket, OnlineError> {
+        let config = self.config.clone().ok_or(OnlineError::NotOffered)?;
+        if !valid_kind(name) {
+            return Err(OnlineError::BadKind);
+        }
+        let token = self.token.clone().ok_or(OnlineError::NotConnected)?;
+        if self.in_flight.len() >= MAX_IN_FLIGHT {
+            return Err(OnlineError::Busy);
+        }
+        Ok(self.get(config.endpoint(path), Some(token)))
+    }
+
+    fn get(&mut self, url: String, token: Option<Secret>) -> Ticket {
         let ticket = Ticket(self.next);
         self.next += 1;
         self.in_flight.insert(ticket);
@@ -557,7 +660,14 @@ impl Online {
             };
             let _ = tx.send(Msg::Done(ticket, generation, answer));
         });
-        Ok(ticket)
+        ticket
+    }
+
+    /// Which account's token is held now: changes each time one is
+    /// connected, swapped or forgotten, so a sync can tell a new account
+    /// from the one it last spoke for.
+    pub fn account_generation(&self) -> u64 {
+        self.token_gen
     }
 
     fn send(&mut self, url: String, token: Secret, body: Body, answer: Answer) -> Ticket {
@@ -583,6 +693,29 @@ impl Online {
             let _ = tx.send(Msg::Done(ticket, generation, answer));
         });
         ticket
+    }
+
+    /// Waits up to `timeout` for `ticket`'s answer and takes it, as a game
+    /// closing down does for one last request. `None` when it did not come.
+    pub fn wait(
+        &mut self,
+        ticket: Ticket,
+        timeout: Duration,
+    ) -> Option<Result<Value, OnlineError>> {
+        let until = Instant::now() + timeout;
+        loop {
+            if self.update() {
+                // Keep the account change for the app to save.
+                self.changed = true;
+            }
+            if let Some(answer) = self.result(ticket) {
+                return Some(answer);
+            }
+            if !self.is_pending(ticket) || Instant::now() >= until {
+                return None;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
     }
 
     /// Whether `ticket`'s run is still on its way.
@@ -722,6 +855,12 @@ impl Online {
     pub fn disconnect(&mut self) {
         self.cancel_connect();
         self.connect = Connect::Idle;
+        self.forget();
+    }
+
+    /// Forgets the account because another client of the token (`ctx.rooms`)
+    /// heard the server no longer knows it.
+    pub(crate) fn signed_out_elsewhere(&mut self) {
         self.forget();
     }
 

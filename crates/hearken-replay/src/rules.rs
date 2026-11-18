@@ -55,6 +55,15 @@ pub trait Replayable: Sized {
     fn finished(&self) -> bool;
     /// What the run has come to so far.
     fn outcome(&self) -> Self::Outcome;
+    /// Where the run stands, by name: `"dealing"`, `"your-turn"`,
+    /// `"over"`. Rules that keep their phase as an enum name it here and
+    /// derive [`finished`](Self::finished) from it, so the screen that
+    /// plays them reports this from its `phase` and never keeps a copy.
+    /// Never spoken; for the agent server, tests and recordings. `None`
+    /// (the default) for rules with no phases worth naming.
+    fn phase(&self) -> Option<&'static str> {
+        None
+    }
 }
 
 /// The rules running live, with every step recorded, so the game plays
@@ -122,6 +131,11 @@ impl<R: Replayable> Recording<R> {
     /// The outcome so far.
     pub fn outcome(&self) -> R::Outcome {
         self.sim.outcome()
+    }
+
+    /// Where the run stands, by name ([`Replayable::phase`]).
+    pub fn phase(&self) -> Option<&'static str> {
+        self.sim.phase()
     }
 
     /// Runs one step with `inputs` and records it. Does nothing once the
@@ -259,6 +273,44 @@ impl From<FormatError> for VerifyError {
 /// than `R::MAX_TICKS`, one with an input `R` has no meaning for, one that
 /// ends before its inputs do, and one whose inputs end before it does.
 pub fn replay<R: Replayable>(run: &Run) -> Result<R, VerifyError> {
+    let sim = play::<R>(run)?;
+    if !sim.finished() {
+        return Err(VerifyError::Unfinished);
+    }
+    Ok(sim)
+}
+
+/// Where a run has got to: the rules replayed through every tick so far,
+/// finished or not.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Progress<O> {
+    pub rules: String,
+    pub seed: u64,
+    pub ticks: u64,
+    /// Whether the rules ended on the last tick.
+    pub finished: bool,
+    /// What the run has come to so far.
+    pub outcome: O,
+}
+
+/// Plays `run` again as [`replay`] does, but accepts one that is not over:
+/// a match in progress, replayed by a server to learn whose turn it is and
+/// what each seat should hear about it. The same checks apply, except that
+/// the rules need not have finished.
+pub fn progress<R: Replayable>(run: &Run) -> Result<Progress<R::Outcome>, VerifyError> {
+    let sim = play::<R>(run)?;
+    Ok(Progress {
+        rules: run.rules.clone(),
+        seed: run.seed,
+        ticks: run.ticks,
+        finished: sim.finished(),
+        outcome: sim.outcome(),
+    })
+}
+
+/// The replay itself: every check but the last, and the rules after the
+/// run's last tick.
+fn play<R: Replayable>(run: &Run) -> Result<R, VerifyError> {
     if run.rules != R::RULES {
         return Err(VerifyError::WrongRules);
     }
@@ -304,9 +356,6 @@ pub fn replay<R: Replayable>(run: &Run) -> Result<R, VerifyError> {
             next += 1;
         }
         sim.step(&decoded[start..next]);
-    }
-    if !sim.finished() {
-        return Err(VerifyError::Unfinished);
     }
     Ok(sim)
 }
@@ -432,11 +481,50 @@ mod tests {
             self.0 = true;
         }
         fn finished(&self) -> bool {
-            self.0
+            self.phase() == Some("done")
         }
         fn outcome(&self) -> u8 {
             1
         }
+        fn phase(&self) -> Option<&'static str> {
+            Some(if self.0 { "done" } else { "waiting" })
+        }
+    }
+
+    /// Rules with nothing to name leave the default.
+    struct Plain;
+    impl Replayable for Plain {
+        const RULES: &'static str = "plain";
+        const MAX_TICKS: u64 = 10;
+        type Input = Tap;
+        type Context = ();
+        type Outcome = u8;
+        fn new(_: u64, _: &()) -> Self {
+            Plain
+        }
+        fn step(&mut self, _: &[Tap]) {}
+        fn finished(&self) -> bool {
+            true
+        }
+        fn outcome(&self) -> u8 {
+            0
+        }
+    }
+
+    #[test]
+    fn a_recording_reports_the_rules_phase() {
+        let setup = Setup {
+            speed: 1.0,
+            slow: 0.1,
+            mode: None,
+        };
+        let mut rec = Recording::<Once>::new(5, &setup).unwrap();
+        assert_eq!(rec.phase(), Some("waiting"));
+        assert!(!rec.finished());
+        rec.step(&[]);
+        assert_eq!(rec.phase(), Some("done"));
+        assert!(rec.finished(), "finished derives from the phase");
+        assert_eq!(Recording::<Plain>::new(1, &()).unwrap().phase(), None);
     }
 
     #[test]

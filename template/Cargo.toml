@@ -10,6 +10,16 @@ authors.workspace = true
 publish = false
 build = "build.rs"
 
+[features]
+# Pebbles online: a two-player match through a rooms server. Try it with
+# `HELLO_HEARKEN_ONLINE_URL=http://127.0.0.1:8787/api/games/hello` against
+# the dev server in `server/` (see `docs/online.md`).
+online = ["hearken/online"]
+# Report a problem: a Settings row that emails what the player wrote, with
+# the session log, through a relay named by `HELLO_HEARKEN_REPORTS_URL`
+# (see `docs/reports.md`). Without the variable the row stays hidden.
+report = ["hearken/report"]
+
 [dependencies]
 # The only dependency: build.rs reads Prism's link arguments from it.
 hearken.workspace = true

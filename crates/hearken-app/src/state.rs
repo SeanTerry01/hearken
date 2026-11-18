@@ -8,8 +8,9 @@ use crate::input::InputEvent;
 pub trait State<G: Game> {
     /// A stable identifier for logs and tests.
     fn name(&self) -> &'static str;
-    /// Whether an automatic update offer may cover this screen. Opt in
-    /// only on a safe home/title menu, never during play or another modal.
+    /// Whether an automatic offer (an update, or reporting a crash) may
+    /// cover this screen. Opt in only on a safe home/title menu, never
+    /// during play or another modal.
     fn allows_update_prompt(&self) -> bool {
         false
     }
@@ -54,6 +55,13 @@ pub trait State<G: Game> {
     }
     /// Spoken on F1.
     fn help(&self, ctx: &Ctx<G>) -> String;
+    /// The screen's current phase, by name, for the agent server's `screen`
+    /// tool, `Headless::phase` and recordings: `Some(self.phases.name())`
+    /// for a screen that keeps a [`crate::Phases`]. `None` (the default)
+    /// for a screen with no phases, such as every menu. Never spoken.
+    fn phase(&self) -> Option<&'static str> {
+        None
+    }
     /// What Discord shows the player doing on this screen, or `None` to
     /// leave it to the screen underneath (then `Game::presence`). Asked
     /// each frame while Discord status is on, from the top screen down, so
