@@ -75,9 +75,10 @@ pub mod verbosity;
 pub mod voiceover;
 
 pub use backend::{
-    event_voice_choice, main_backend_options, narrator_running, pick_backend, pick_backend_gated,
-    pick_event_backend, preserve_backend_default_pitch, usable, BackendId, EventVoiceChoice,
-    PrismRegistry, PrismVoice, VoiceBackend, VoiceFeatures, VoiceRegistry,
+    event_voice_choice, main_backend_options, narrator_running, pick_backend,
+    pick_backend_explained, pick_backend_gated, pick_event_backend, preserve_backend_default_pitch,
+    usable, BackendId, EventVoiceChoice, PreferenceMiss, PrismRegistry, PrismVoice, VoiceBackend,
+    VoiceFeatures, VoiceRegistry,
 };
 pub use capture::{
     CaptureProfile, CaptureSpeech, ConfigureCall, NullSpeech, SharedCapture, SpeechChannel,

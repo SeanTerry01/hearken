@@ -31,6 +31,37 @@ fn narrator_on() -> bool {
     true
 }
 
+/// Log lines at info level and above, per test thread: tests run on their
+/// own threads, so each reads only what it logged.
+struct ThreadLog;
+
+thread_local! {
+    static LOGGED: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+impl log::Log for ThreadLog {
+    fn enabled(&self, metadata: &log::Metadata) -> bool {
+        metadata.level() <= log::Level::Info
+    }
+    fn log(&self, record: &log::Record) {
+        if self.enabled(record.metadata()) {
+            LOGGED.with(|lines| lines.borrow_mut().push(record.args().to_string()));
+        }
+    }
+    fn flush(&self) {}
+}
+
+static THREAD_LOG: ThreadLog = ThreadLog;
+
+/// Start capturing this thread's log lines; returns a reader that drains
+/// them.
+fn capture_log() -> impl Fn() -> Vec<String> {
+    let _ = log::set_logger(&THREAD_LOG);
+    log::set_max_level(log::LevelFilter::Info);
+    LOGGED.with(|lines| lines.borrow_mut().clear());
+    || LOGGED.with(|lines| std::mem::take(&mut *lines.borrow_mut()))
+}
+
 fn spoken(lines: &[(&str, bool)]) -> Vec<(String, bool)> {
     lines
         .iter()
@@ -1042,6 +1073,100 @@ fn a_chosen_voice_that_appears_later_is_bound_by_refresh() {
     ctx.voice("JAWS").unwrap().set_runtime_supported(true);
     assert!(s.refresh());
     assert_eq!(s.backend_name(), "JAWS");
+}
+
+#[test]
+fn a_chosen_voice_that_cannot_speak_warns_once_per_change() {
+    let ctx = every_kind_registry();
+    let mut s = Speech::with_registry(Box::new(ctx.clone()), None);
+    let logged = capture_log();
+    s.select_main_backend(Some("JAWS"));
+    for _ in 0..4 {
+        s.poll(REFRESH_INTERVAL_S);
+    }
+    let fallback = "Requested speech backend JAWS is not usable; falling back to automatic choice";
+    let lines = logged();
+    assert_eq!(
+        lines.iter().filter(|line| *line == fallback).count(),
+        1,
+        "{lines:?}"
+    );
+    // JAWS starts: bound, and said so once.
+    ctx.voice("JAWS").unwrap().set_runtime_supported(true);
+    for _ in 0..3 {
+        s.poll(REFRESH_INTERVAL_S);
+    }
+    assert_eq!(s.backend_name(), "JAWS");
+    let lines = logged();
+    let back = "Requested speech backend JAWS is usable again; using it";
+    assert_eq!(
+        lines.iter().filter(|line| *line == back).count(),
+        1,
+        "{lines:?}"
+    );
+    // It closes again: one more warning, not one per probe.
+    ctx.voice("JAWS").unwrap().set_runtime_supported(false);
+    for _ in 0..3 {
+        s.poll(REFRESH_INTERVAL_S);
+    }
+    assert_eq!(s.backend_name(), "NVDA");
+    let lines = logged();
+    assert_eq!(
+        lines.iter().filter(|line| *line == fallback).count(),
+        1,
+        "{lines:?}"
+    );
+}
+
+#[test]
+fn probes_do_not_repeat_an_event_selection_that_cannot_succeed() {
+    // Only the built-in voice speaks; the saved event voice, SAPI, is
+    // registered but cannot. Nothing changes between probes, so the
+    // selection must not run again on each one.
+    let ctx = FakeRegistry::new(vec![
+        FakeVoice::new("SAPI", 97, runtime(false)),
+        FakeVoice::new("Genny", BUILTIN_PRIORITY, ADJUSTABLE),
+    ]);
+    let genny = ctx.voice("Genny").unwrap().clone();
+    let sapi = ctx.voice("SAPI").unwrap().clone();
+    let logged = capture_log();
+    let mut s = Speech::with_registry(Box::new(ctx), None);
+    // The built-in voice is the player's main voice, so SAPI recovering
+    // later cannot take it over.
+    s.select_main_backend(Some("Genny"));
+    assert_eq!(s.backend_name(), "Genny");
+    s.select_event_backend(Some("SAPI"));
+    assert!(!s.has_separate_event_voice());
+    // A probe is one main voice pick: one acquire of the chosen voice.
+    let per_probe = |s: &mut Speech| {
+        let before = (genny.acquire_calls(), sapi.acquire_calls());
+        s.poll(REFRESH_INTERVAL_S);
+        (
+            genny.acquire_calls() - before.0,
+            sapi.acquire_calls() - before.1,
+        )
+    };
+    for _ in 0..4 {
+        assert_eq!(per_probe(&mut s), (1, 0));
+    }
+    // Another settings change asking for the same voice runs the selection
+    // but does not log it again.
+    s.select_event_backend(Some("SAPI"));
+    let lines = logged();
+    let unavailable = "Event speech backend SAPI not available; events use the main voice";
+    assert_eq!(
+        lines.iter().filter(|line| *line == unavailable).count(),
+        1,
+        "{lines:?}"
+    );
+    // SAPI recovers. Probes still leave it alone; the window regaining
+    // focus tries again and binds it.
+    sapi.set_runtime_supported(true);
+    assert_eq!(per_probe(&mut s), (1, 0));
+    assert!(!s.has_separate_event_voice());
+    s.request_refresh();
+    s.poll(0.016);
+    assert_eq!(s.event_backend_name(), "SAPI");
 }
 
 #[test]

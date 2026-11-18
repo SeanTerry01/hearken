@@ -537,49 +537,87 @@ pub fn pick_backend(
 
 /// [`pick_backend`] with the Narrator probe supplied, so the policy can be
 /// tested against a fake registry with and without Narrator "running".
+/// Warns on every call that falls back from `override_name`; a caller that
+/// probes often uses [`pick_backend_explained`] and warns on change.
 pub fn pick_backend_gated(
     ctx: &dyn VoiceRegistry,
     override_name: Option<&str>,
     narrator_probe: fn() -> bool,
 ) -> Option<Box<dyn VoiceBackend>> {
+    let (backend, miss) = pick_backend_explained(ctx, override_name, narrator_probe);
+    if let (Some(name), Some(miss)) = (override_name, miss) {
+        log::warn!("{}", miss.describe(name));
+    }
+    backend
+}
+
+/// Why a named backend was passed over for the automatic choice.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PreferenceMiss {
+    /// `UIA` was named while Narrator is closed.
+    NarratorClosed,
+    /// The backend exists but cannot speak right now.
+    Unusable,
+    /// No backend by that name could be acquired.
+    NotFound,
+}
+
+impl PreferenceMiss {
+    /// The log line for a fallback from `name`.
+    pub fn describe(self, name: &str) -> String {
+        match self {
+            Self::NarratorClosed => format!(
+                "Requested speech backend {name} needs Narrator, which is not running; falling back to automatic choice"
+            ),
+            Self::Unusable => format!(
+                "Requested speech backend {name} is not usable; falling back to automatic choice"
+            ),
+            Self::NotFound => format!(
+                "Requested speech backend {name} not found; falling back to automatic choice"
+            ),
+        }
+    }
+}
+
+/// [`pick_backend_gated`] without the logging: the picked backend, and why
+/// `preferred` was passed over when it was. The miss is `None` when there
+/// is no preference or the preference was bound.
+pub fn pick_backend_explained(
+    ctx: &dyn VoiceRegistry,
+    preferred: Option<&str>,
+    narrator_probe: fn() -> bool,
+) -> (Option<Box<dyn VoiceBackend>>, Option<PreferenceMiss>) {
     // The probe runs once per pick, not per candidate: one process scan per
     // 3 s health check is free, one per backend is not.
     let narrator = narrator_probe();
-    if let Some(name) = override_name.filter(|name| !name.is_empty()) {
+    let mut miss = None;
+    if let Some(name) = preferred.filter(|name| !name.is_empty()) {
         if name == UIA_BACKEND && !narrator {
             // UIA reports itself usable on every modern Windows, so a saved
             // Narrator choice with Narrator closed would bind a voice that
             // says nothing.
-            log::warn!(
-                "Requested speech backend {name} needs Narrator, which is not running; falling back to automatic choice"
-            );
+            miss = Some(PreferenceMiss::NarratorClosed);
         } else {
             match ctx.id_by_name(name).map(|id| ctx.acquire(id)) {
                 Some(Ok(backend)) => {
                     if usable(backend.as_ref()) {
-                        return Some(backend);
+                        return (Some(backend), None);
                     }
-                    log::warn!(
-                        "Requested speech backend {name} is not usable; falling back to automatic choice"
-                    );
+                    miss = Some(PreferenceMiss::Unusable);
                 }
                 Some(Err(err)) => {
-                    log::warn!(
-                        "Requested speech backend {name} not found; falling back to automatic choice: {err}"
-                    );
+                    log::debug!("Speech backend {name} could not be acquired: {err}");
+                    miss = Some(PreferenceMiss::NotFound);
                 }
-                None => {
-                    log::warn!(
-                        "Requested speech backend {name} not found; falling back to automatic choice"
-                    );
-                }
+                None => miss = Some(PreferenceMiss::NotFound),
             }
         }
     }
-    ranked_candidates(ctx, narrator)
+    let backend = ranked_candidates(ctx, narrator)
         .into_iter()
         .filter_map(|backend_id| ctx.acquire(backend_id).ok())
-        .find(|backend| usable(backend.as_ref()))
+        .find(|backend| usable(backend.as_ref()));
+    (backend, miss)
 }
 
 /// The backends the automatic pick considers, best first: every registered
@@ -690,11 +728,11 @@ pub fn pick_event_backend(
     let backend = match ctx.id_by_name(name).map(|id| ctx.acquire(id)) {
         Some(Ok(backend)) => backend,
         Some(Err(err)) => {
-            log::info!("Event speech backend {name} not available: {err}");
+            log::debug!("Event speech backend {name} not available: {err}");
             return None;
         }
         None => {
-            log::info!("Event speech backend {name} not available");
+            log::debug!("Event speech backend {name} not available");
             return None;
         }
     };
