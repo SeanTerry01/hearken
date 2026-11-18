@@ -64,6 +64,9 @@ pub struct CaptureProfile {
     pub supports_volume: bool,
     pub event_supports_rate: bool,
     pub event_backend_options: Vec<String>,
+    /// What `main_backend_options` answers. Choosing one of these with
+    /// `select_main_backend` makes `backend_name` answer with it.
+    pub main_backend_options: Vec<String>,
     pub voice_names: Vec<String>,
 }
 
@@ -79,6 +82,7 @@ impl CaptureProfile {
             supports_volume: false,
             event_supports_rate: false,
             event_backend_options: Vec::new(),
+            main_backend_options: Vec::new(),
             voice_names: Vec::new(),
         }
     }
@@ -94,6 +98,9 @@ impl CaptureProfile {
             supports_volume: true,
             event_supports_rate: true,
             event_backend_options: vec!["OneCore".to_string(), "SAPI".to_string()],
+            main_backend_options: ["NVDA", "OneCore", "SAPI", "Genny"]
+                .map(str::to_string)
+                .to_vec(),
             voice_names: vec!["David".to_string(), "Zira".to_string()],
         }
     }
@@ -115,6 +122,10 @@ pub struct CaptureSpeech {
     /// The event-voice preference last selected; `Some` binds the profile's
     /// event voice (when it has one), `None` sends events to the main voice.
     event_pref: Option<String>,
+    /// The main voice last chosen with `select_main_backend`.
+    main_pref: Option<String>,
+    /// Every `select_main_backend` call, in order.
+    main_selections: Vec<Option<String>>,
     stop_main_calls: u32,
     stop_event_calls: u32,
     stop_calls: u32,
@@ -155,6 +166,8 @@ impl CaptureSpeech {
             prefix: String::new(),
             profile,
             event_pref: None,
+            main_pref: None,
+            main_selections: Vec::new(),
             stop_main_calls: 0,
             stop_event_calls: 0,
             stop_calls: 0,
@@ -197,6 +210,11 @@ impl CaptureSpeech {
 
     pub fn is_terse(&self) -> bool {
         self.terse
+    }
+
+    /// Every `select_main_backend` call, in order (`None` for automatic).
+    pub fn main_selections(&self) -> &[Option<String>] {
+        &self.main_selections
     }
 
     pub fn profile(&self) -> &CaptureProfile {
@@ -410,7 +428,12 @@ impl SpeechSink for CaptureSpeech {
     }
 
     fn backend_name(&self) -> String {
-        self.profile.backend_name.clone()
+        // A chosen voice answers when the profile can bind it; automatic,
+        // or a choice the profile lacks, answers with the profile's own.
+        match &self.main_pref {
+            Some(name) if self.profile.main_backend_options.contains(name) => name.clone(),
+            _ => self.profile.backend_name.clone(),
+        }
     }
 
     fn has_separate_event_voice(&self) -> bool {
@@ -450,6 +473,16 @@ impl SpeechSink for CaptureSpeech {
 
     fn select_event_backend(&mut self, name: Option<&str>) {
         self.event_pref = name.filter(|name| !name.is_empty()).map(str::to_string);
+    }
+
+    fn main_backend_options(&self) -> Vec<String> {
+        self.profile.main_backend_options.clone()
+    }
+
+    fn select_main_backend(&mut self, name: Option<&str>) {
+        let name = name.filter(|name| !name.is_empty()).map(str::to_string);
+        self.main_selections.push(name.clone());
+        self.main_pref = name;
     }
 
     fn set_braille_only(&mut self, _on: bool) {
@@ -615,6 +648,12 @@ impl SpeechSink for SharedCapture {
     }
     fn select_event_backend(&mut self, name: Option<&str>) {
         self.0.borrow_mut().select_event_backend(name)
+    }
+    fn main_backend_options(&self) -> Vec<String> {
+        self.0.borrow().main_backend_options()
+    }
+    fn select_main_backend(&mut self, name: Option<&str>) {
+        self.0.borrow_mut().select_main_backend(name)
     }
     fn voice_names(&self) -> Vec<String> {
         self.0.borrow().voice_names()

@@ -7,9 +7,9 @@ use std::time::Duration;
 use crate::SpeechEnv;
 
 use super::backend::{
-    narrator_running, never_automatic, pick_backend_gated, pick_event_backend,
-    preserve_backend_default_pitch, usable, PrismRegistry, VoiceBackend, VoiceFeatures,
-    VoiceRegistry,
+    event_voice_choice, main_backend_options, narrator_running, never_automatic,
+    pick_backend_gated, pick_event_backend, preserve_backend_default_pitch, usable,
+    EventVoiceChoice, PrismRegistry, VoiceBackend, VoiceFeatures, VoiceRegistry,
 };
 use super::{PreviewFeature, SpeechSink, VoiceReport, EVENT_BACKEND, REFRESH_INTERVAL_S};
 
@@ -468,6 +468,13 @@ impl SpeechSink for Speech {
         options
     }
 
+    fn main_backend_options(&self) -> Vec<String> {
+        match &self.ctx {
+            Some(ctx) => main_backend_options(ctx.as_ref(), self.narrator_probe),
+            None => Vec::new(),
+        }
+    }
+
     fn select_main_backend(&mut self, name: Option<&str>) {
         let name = name.filter(|name| !name.is_empty()).map(str::to_string);
         if self.chosen_main == name {
@@ -490,14 +497,18 @@ impl SpeechSink for Speech {
         if self.ctx.is_none() || self.backend.is_none() {
             return;
         }
-        let Some(mut name) = name.map(str::to_string) else {
+        let main_name = self.backend_name();
+        // Enumerating acquires every backend, so skip it when the answer
+        // cannot need it: no preference, or the main voice's own name.
+        let options = match name {
+            Some(name) if name != main_name => self.event_backend_options(),
+            _ => Vec::new(),
+        };
+        let EventVoiceChoice::Separate(name) = event_voice_choice(name, &main_name, &options)
+        else {
             self.event_backend = None;
             return;
         };
-        let options = self.event_backend_options();
-        if !options.contains(&name) && !options.is_empty() {
-            name = options[0].clone();
-        }
         let (Some(ctx), Some(main)) = (&self.ctx, &self.backend) else {
             return;
         };
@@ -653,7 +664,10 @@ impl SpeechSink for Speech {
         if old_name.as_deref() == Some(new_name.as_str()) {
             // Same main voice as before; just make sure the event voice is
             // alive too (it can die independently, e.g. a SAPI hiccup).
-            if self.event_pref.is_some() && self.event_backend.is_none() {
+            // A preference naming the main voice shares it on purpose, so
+            // there is nothing to re-select on every probe.
+            let shares_main = self.event_pref.as_deref() == Some(new_name.as_str());
+            if self.event_pref.is_some() && self.event_backend.is_none() && !shares_main {
                 let pref = self.event_pref.clone();
                 self.select_event_backend(pref.as_deref());
                 if self.event_backend.is_some() && !self.config.is_empty() {

@@ -493,6 +493,9 @@ pub fn narrator_running() -> bool {
 /// Prism's registry name for its clipboard backend.
 const CLIPBOARD_BACKEND: &str = "Clipboard";
 
+/// Prism's registry name for Narrator's route (UI Automation notifications).
+const UIA_BACKEND: &str = "UIA";
+
 /// Prism's registry name for its silent backend.
 const NO_SPEECH_BACKEND: &str = "No Speech";
 
@@ -523,6 +526,7 @@ fn name_of(ctx: &dyn VoiceRegistry, id: BackendId) -> String {
 /// is never chosen automatically; naming it as the override still works.
 /// `No Speech` is skipped the same way: at priority 0 (0.1.6 on) it outranks
 /// the built-in voice, so a machine with no other voice would go silent.
+/// A named `UIA` is honoured only while Narrator is running.
 /// Returns `None` when nothing on the machine can speak.
 pub fn pick_backend(
     ctx: &dyn VoiceRegistry,
@@ -538,31 +542,54 @@ pub fn pick_backend_gated(
     override_name: Option<&str>,
     narrator_probe: fn() -> bool,
 ) -> Option<Box<dyn VoiceBackend>> {
-    if let Some(name) = override_name.filter(|name| !name.is_empty()) {
-        match ctx.id_by_name(name).map(|id| ctx.acquire(id)) {
-            Some(Ok(backend)) => {
-                if usable(backend.as_ref()) {
-                    return Some(backend);
-                }
-                log::warn!(
-                    "Requested speech backend {name} is not usable; falling back to automatic choice"
-                );
-            }
-            Some(Err(err)) => {
-                log::warn!(
-                    "Requested speech backend {name} not found; falling back to automatic choice: {err}"
-                );
-            }
-            None => {
-                log::warn!(
-                    "Requested speech backend {name} not found; falling back to automatic choice"
-                );
-            }
-        }
-    }
     // The probe runs once per pick, not per candidate: one process scan per
     // 3 s health check is free, one per backend is not.
     let narrator = narrator_probe();
+    if let Some(name) = override_name.filter(|name| !name.is_empty()) {
+        if name == UIA_BACKEND && !narrator {
+            // UIA reports itself usable on every modern Windows, so a saved
+            // Narrator choice with Narrator closed would bind a voice that
+            // says nothing.
+            log::warn!(
+                "Requested speech backend {name} needs Narrator, which is not running; falling back to automatic choice"
+            );
+        } else {
+            match ctx.id_by_name(name).map(|id| ctx.acquire(id)) {
+                Some(Ok(backend)) => {
+                    if usable(backend.as_ref()) {
+                        return Some(backend);
+                    }
+                    log::warn!(
+                        "Requested speech backend {name} is not usable; falling back to automatic choice"
+                    );
+                }
+                Some(Err(err)) => {
+                    log::warn!(
+                        "Requested speech backend {name} not found; falling back to automatic choice: {err}"
+                    );
+                }
+                None => {
+                    log::warn!(
+                        "Requested speech backend {name} not found; falling back to automatic choice"
+                    );
+                }
+            }
+        }
+    }
+    ranked_candidates(ctx, narrator)
+        .into_iter()
+        .filter_map(|backend_id| ctx.acquire(backend_id).ok())
+        .find(|backend| usable(backend.as_ref()))
+}
+
+/// The backends the automatic pick considers, best first: every registered
+/// backend except `Clipboard` and `No Speech`, with `UIA` only while
+/// Narrator runs and then ranked last. Equal priorities keep registry order.
+///
+/// The one candidate walk behind both [`pick_backend_gated`] (the first that
+/// can speak) and [`main_backend_options`] (all that can), so the list a
+/// player chooses from cannot drift from what automatic would bind.
+fn ranked_candidates(ctx: &dyn VoiceRegistry, narrator: bool) -> Vec<BackendId> {
     let mut candidates: Vec<(i32, BackendId)> = Vec::new();
     for index in 0..ctx.backend_count() {
         let Some(backend_id) = ctx.id_at(index) else {
@@ -572,7 +599,7 @@ pub fn pick_backend_gated(
         if never_automatic(&name) {
             continue;
         }
-        let priority = if name == "UIA" {
+        let priority = if name == UIA_BACKEND {
             if !narrator {
                 continue;
             }
@@ -585,15 +612,57 @@ pub fn pick_backend_gated(
     // Sorting by `Reverse` is stable: equal priorities keep registry order,
     // so the first-registered of a tie still wins here.
     candidates.sort_by_key(|(priority, _)| std::cmp::Reverse(*priority));
-    for (_, backend_id) in candidates {
-        let Ok(backend) = ctx.acquire(backend_id) else {
-            continue;
-        };
-        if usable(backend.as_ref()) {
-            return Some(backend);
-        }
+    candidates.into_iter().map(|(_, id)| id).collect()
+}
+
+/// Every backend that can be the main voice right now, by registry name, in
+/// the order the automatic pick ranks them. Never `Clipboard` or
+/// `No Speech`; `UIA` only while Narrator runs. Independent of which voice
+/// is bound.
+pub fn main_backend_options(ctx: &dyn VoiceRegistry, narrator_probe: fn() -> bool) -> Vec<String> {
+    ranked_candidates(ctx, narrator_probe())
+        .into_iter()
+        .filter_map(|backend_id| ctx.acquire(backend_id).ok())
+        .filter(|backend| usable(backend.as_ref()))
+        .map(|backend| backend.name())
+        .collect()
+}
+
+/// Where gameplay events go, given the event-voice preference.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum EventVoiceChoice {
+    /// Events go through the main voice.
+    Shared,
+    /// Events go through this backend, by registry name.
+    Separate(String),
+}
+
+/// Decide the event voice from the preference, the bound main voice's name
+/// and the separate event-voice options.
+///
+/// No preference shares the main voice. A preference naming the main voice
+/// also shares it: the player picked that voice for both, and hopping events
+/// to some other software voice would undo their choice. A preference that
+/// is an option is honoured. One that is neither (a Windows save opened on a
+/// Mac) becomes the first option, or stays as asked when there are none.
+pub fn event_voice_choice(
+    preference: Option<&str>,
+    main_name: &str,
+    options: &[String],
+) -> EventVoiceChoice {
+    let Some(preference) = preference.filter(|name| !name.is_empty()) else {
+        return EventVoiceChoice::Shared;
+    };
+    if preference == main_name {
+        return EventVoiceChoice::Shared;
     }
-    None
+    if options.iter().any(|option| option == preference) {
+        return EventVoiceChoice::Separate(preference.to_string());
+    }
+    match options.first() {
+        Some(first) => EventVoiceChoice::Separate(first.clone()),
+        None => EventVoiceChoice::Separate(preference.to_string()),
+    }
 }
 
 /// A second, independent voice for gameplay events.

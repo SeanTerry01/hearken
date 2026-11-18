@@ -78,6 +78,9 @@ impl SpeechSink for StubSink {
         self.enumerations.fetch_add(1, Ordering::SeqCst);
         vec!["stub-event".to_string()]
     }
+    fn main_backend_options(&self) -> Vec<String> {
+        vec!["stub".to_string(), "stub-event".to_string()]
+    }
     fn select_event_backend(&mut self, name: Option<&str>) {
         self.calls
             .lock()
@@ -566,6 +569,7 @@ fn queries_answer_from_the_snapshot_without_touching_the_backend() {
     assert!(sink.supports_rate());
     assert!(!sink.supports_pitch());
     assert_eq!(sink.voice_names(), ["Stub Voice"]);
+    assert_eq!(sink.main_backend_options(), ["stub", "stub-event"]);
 }
 
 /// A SAPI purge that never returns can take both voices for the rest of

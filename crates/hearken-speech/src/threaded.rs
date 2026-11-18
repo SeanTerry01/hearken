@@ -172,6 +172,7 @@ struct Snapshot {
     event_supports_rate: bool,
     supports_braille: bool,
     event_backend_options: Vec<String>,
+    main_backend_options: Vec<String>,
     voice_names: Vec<String>,
 }
 
@@ -243,6 +244,7 @@ fn publish(
         event_supports_rate: query!(abandoned, inner.event_supports_rate()),
         supports_braille: query!(abandoned, inner.supports_braille()),
         event_backend_options: query!(abandoned, inner.event_backend_options()),
+        main_backend_options: query!(abandoned, inner.main_backend_options()),
         voice_names: query!(abandoned, inner.voice_names()),
     };
     *snapshot.lock().expect("speech snapshot lock") = fresh;
@@ -281,7 +283,7 @@ fn publish_status(
 }
 
 /// What a health probe publishes: the cheap status always, the
-/// enumerations (event-voice options, installed voices) only when the probe
+/// enumerations (voice options, installed voices) only when the probe
 /// switched a voice, because that is the only time they can differ.
 ///
 /// Enumerating acquires every Prism backend, and Prism's OneCore backend
@@ -925,6 +927,10 @@ impl SpeechSink for ThreadedSpeech {
 
     fn event_backend_options(&self) -> Vec<String> {
         self.snapshot().event_backend_options
+    }
+
+    fn main_backend_options(&self) -> Vec<String> {
+        self.snapshot().main_backend_options
     }
 
     fn select_event_backend(&mut self, name: Option<&str>) {

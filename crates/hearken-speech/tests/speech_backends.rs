@@ -5,8 +5,9 @@
 
 use hearken_speech::fakes::{FakeRegistry, FakeVoice};
 use hearken_speech::{
-    apply_speech_settings, pick_backend_gated, pick_event_backend, Speech, SpeechSettings,
-    SpeechSink, VoiceFeatures, EVENT_BACKEND, REFRESH_INTERVAL_S,
+    apply_speech_settings, event_voice_choice, main_backend_options, pick_backend_gated,
+    pick_event_backend, EventVoiceChoice, Speech, SpeechSettings, SpeechSink, VoiceFeatures,
+    EVENT_BACKEND, REFRESH_INTERVAL_S,
 };
 
 const SPEAKING: VoiceFeatures = VoiceFeatures::SPEAKING;
@@ -486,11 +487,10 @@ fn test_select_event_backend_switches_and_clears() {
     assert_eq!(s.event_backend_name(), "OneCore");
     s.select_event_backend(None); // back to the main voice
     assert_eq!(s.event_backend_name(), "none");
-    // Asking for the main voice by name is not a real separate option, so the
-    // preference falls back to the best available one (None is how you pick
-    // the main voice for events).
+    // Asking for the main voice by name shares the main voice: the player
+    // chose that voice for both.
     s.select_event_backend(Some("NVDA"));
-    assert_eq!(s.event_backend_name(), "OneCore");
+    assert_eq!(s.event_backend_name(), "none");
 }
 
 #[test]
@@ -935,4 +935,154 @@ fn test_event_voice_report_asks_the_voice_events_use() {
         None,
         "an older NVDA cannot tell"
     );
+}
+
+// -- choosing the main voice ----------------------------------------------------
+
+/// Every kind of backend a Windows registry holds, in Prism's order, with
+/// NVDA running and JAWS closed.
+fn every_kind_registry() -> FakeRegistry {
+    FakeRegistry::new(vec![
+        FakeVoice::new("NVDA", 103, SPEAKING),
+        FakeVoice::new("JAWS", 100, runtime(false)),
+        FakeVoice::new("OneCore", 98, ADJUSTABLE),
+        FakeVoice::new("SAPI", 97, ADJUSTABLE),
+        FakeVoice::new("UIA", 97, SPEAKING),
+        FakeVoice::new("Clipboard", 0, SPEAKING),
+        FakeVoice::new("No Speech", 0, SPEAKING),
+        FakeVoice::new("Genny", BUILTIN_PRIORITY, ADJUSTABLE),
+    ])
+}
+
+#[test]
+fn main_backend_options_rank_usable_voices_like_the_automatic_pick() {
+    let ctx = every_kind_registry();
+    // JAWS is closed, Clipboard and No Speech are never offered, and UIA
+    // waits for Narrator.
+    assert_eq!(
+        main_backend_options(&ctx, narrator_off),
+        vec!["NVDA", "OneCore", "SAPI", "Genny"]
+    );
+    // With Narrator up, UIA ranks where the automatic pick puts it: last
+    // before the built-in voice.
+    assert_eq!(
+        main_backend_options(&ctx, narrator_on),
+        vec!["NVDA", "OneCore", "SAPI", "UIA", "Genny"]
+    );
+    // The first option is always what automatic binds.
+    assert_eq!(picked_name(&ctx, None).as_deref(), Some("NVDA"));
+}
+
+#[test]
+fn main_backend_options_do_not_depend_on_the_bound_voice() {
+    let ctx = every_kind_registry();
+    let on_nvda = speech_on(&ctx, "NVDA");
+    let on_sapi = speech_on(&ctx, "SAPI");
+    assert_eq!(
+        on_nvda.main_backend_options(),
+        on_sapi.main_backend_options()
+    );
+    assert!(Speech::disabled().main_backend_options().is_empty());
+}
+
+#[test]
+fn a_narrator_preference_is_ignored_while_narrator_is_closed() {
+    let ctx = every_kind_registry();
+    let off = pick_backend_gated(&ctx, Some("UIA"), narrator_off).unwrap();
+    assert_eq!(off.name(), "NVDA");
+    let on = pick_backend_gated(&ctx, Some("UIA"), narrator_on).unwrap();
+    assert_eq!(on.name(), "UIA");
+}
+
+#[test]
+fn a_chosen_main_voice_binds_and_automatic_returns() {
+    let ctx = every_kind_registry();
+    let mut s = Speech::with_registry(Box::new(ctx), None);
+    assert_eq!(s.backend_name(), "NVDA");
+    s.select_main_backend(Some("Genny"));
+    assert_eq!(s.backend_name(), "Genny");
+    s.select_main_backend(Some("SAPI"));
+    assert_eq!(s.backend_name(), "SAPI");
+    s.select_main_backend(None);
+    assert_eq!(s.backend_name(), "NVDA");
+}
+
+#[test]
+fn a_chosen_voice_that_appears_later_is_bound_by_refresh() {
+    // JAWS chosen while closed: the automatic pick speaks meanwhile, and the
+    // health check binds JAWS once it starts.
+    let ctx = every_kind_registry();
+    let mut s = Speech::with_registry(Box::new(ctx.clone()), None);
+    s.select_main_backend(Some("JAWS"));
+    assert_eq!(s.backend_name(), "NVDA");
+    ctx.voice("JAWS").unwrap().set_runtime_supported(true);
+    assert!(s.refresh());
+    assert_eq!(s.backend_name(), "JAWS");
+}
+
+#[test]
+fn an_event_voice_naming_the_main_voice_shares_it_until_the_main_voice_moves() {
+    // No screen reader: OneCore is the automatic main voice, SAPI events.
+    let ctx = FakeRegistry::new(vec![
+        FakeVoice::new("NVDA", 103, runtime(false)),
+        FakeVoice::new("OneCore", 98, ADJUSTABLE),
+        FakeVoice::new("SAPI", 97, ADJUSTABLE),
+    ]);
+    let mut s = Speech::with_registry(Box::new(ctx), None);
+    assert_eq!(s.backend_name(), "OneCore");
+    assert_eq!(s.event_backend_name(), "SAPI");
+    // The player makes SAPI the main voice: events share it rather than
+    // hopping to OneCore.
+    s.select_main_backend(Some("SAPI"));
+    assert_eq!(s.backend_name(), "SAPI");
+    assert!(!s.has_separate_event_voice());
+    // A probe with nothing changed keeps sharing.
+    assert!(!s.refresh());
+    assert!(!s.has_separate_event_voice());
+    // Back to automatic: the separate SAPI event voice returns.
+    s.select_main_backend(None);
+    assert_eq!(s.backend_name(), "OneCore");
+    assert_eq!(s.event_backend_name(), "SAPI");
+}
+
+#[test]
+fn event_voice_choice_table() {
+    let options = ["OneCore".to_string(), "SAPI".to_string()];
+    let separate = |name: &str| EventVoiceChoice::Separate(name.to_string());
+    let cases: [(Option<&str>, &str, &[String], EventVoiceChoice); 7] = [
+        (None, "NVDA", &options, EventVoiceChoice::Shared),
+        (Some(""), "NVDA", &options, EventVoiceChoice::Shared),
+        (Some("SAPI"), "SAPI", &[], EventVoiceChoice::Shared),
+        (Some("SAPI"), "NVDA", &options, separate("SAPI")),
+        (Some("OneCore"), "NVDA", &options, separate("OneCore")),
+        // Not on this machine: the first option stands in.
+        (Some("AVSpeech"), "NVDA", &options, separate("OneCore")),
+        // Nothing to stand in: asked for as is, and bound only if it can be.
+        (Some("AVSpeech"), "NVDA", &[], separate("AVSpeech")),
+    ];
+    for (preference, main, options, expected) in cases {
+        assert_eq!(
+            event_voice_choice(preference, main, options),
+            expected,
+            "{preference:?} with main {main}"
+        );
+    }
+}
+
+#[test]
+fn apply_speech_settings_keeps_an_event_voice_that_is_the_main_voice() {
+    let ctx = FakeRegistry::new(vec![
+        FakeVoice::new("OneCore", 98, ADJUSTABLE),
+        FakeVoice::new("SAPI", 97, ADJUSTABLE),
+    ]);
+    let mut s = Speech::with_registry(Box::new(ctx), Some("SAPI".to_string()));
+    let mut settings = SpeechSettings {
+        separate_event_voice: true,
+        event_backend: "SAPI".to_string(),
+        ..Default::default()
+    };
+    apply_speech_settings(&mut s, &mut settings);
+    assert_eq!(s.backend_name(), "SAPI");
+    assert!(!s.has_separate_event_voice());
+    assert_eq!(settings.event_backend, "SAPI");
 }

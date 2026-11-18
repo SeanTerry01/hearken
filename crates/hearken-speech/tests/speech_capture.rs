@@ -274,3 +274,23 @@ fn a_shared_capture_is_read_through_its_handle() {
     assert_eq!(handle.borrow().main_lines(), vec!["one".to_string()]);
     assert_eq!(handle.borrow().event_lines(), vec!["two".to_string()]);
 }
+
+#[test]
+fn capture_records_main_voice_choices_and_binds_the_profile_options() {
+    let mut capture = CaptureSpeech::full_voice();
+    assert_eq!(
+        capture.main_backend_options(),
+        ["NVDA", "OneCore", "SAPI", "Genny"]
+    );
+    capture.select_main_backend(Some("Genny"));
+    assert_eq!(capture.backend_name(), "Genny");
+    // A choice the profile cannot bind answers with the profile's voice.
+    capture.select_main_backend(Some("JAWS"));
+    assert_eq!(capture.backend_name(), "NVDA");
+    capture.select_main_backend(None);
+    assert_eq!(capture.backend_name(), "NVDA");
+    assert_eq!(
+        capture.main_selections(),
+        [Some("Genny".to_string()), Some("JAWS".to_string()), None]
+    );
+}
