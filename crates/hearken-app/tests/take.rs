@@ -326,7 +326,12 @@ fn shift_and_enter_saves_one_take_as_a_file_of_its_length() {
     );
     h.clear();
     h.send(InputEvent::key_mods(Key::Return, Mods::SHIFT));
-    assert_eq!(h.spoken(), vec!["Saving Morning run. Escape stops it."]);
+    // A short take can finish saving within this same frame, so only the
+    // first line is certain here.
+    assert_eq!(
+        h.spoken().first().map(String::as_str),
+        Some("Saving Morning run. Escape stops it.")
+    );
     let began = Instant::now();
     while !h.spoken().iter().any(|l| l.starts_with("Saved ")) {
         h.frame(0.016);

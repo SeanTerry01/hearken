@@ -1259,6 +1259,9 @@ dependencies = [
 [[package]]
 name = "hearken-genny"
 version = "0.1.0"
+dependencies = [
+ "flate2",
+]
 
 [[package]]
 name = "hearken-l10n"
