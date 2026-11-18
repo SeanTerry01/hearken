@@ -7,8 +7,9 @@ use std::time::Duration;
 use crate::SpeechEnv;
 
 use super::backend::{
-    narrator_running, pick_backend_gated, pick_event_backend, preserve_backend_default_pitch,
-    usable, PrismRegistry, VoiceBackend, VoiceFeatures, VoiceRegistry,
+    narrator_running, never_automatic, pick_backend_gated, pick_event_backend,
+    preserve_backend_default_pitch, usable, PrismRegistry, VoiceBackend, VoiceFeatures,
+    VoiceRegistry,
 };
 use super::{PreviewFeature, SpeechSink, VoiceReport, EVENT_BACKEND, REFRESH_INTERVAL_S};
 
@@ -441,7 +442,8 @@ impl SpeechSink for Speech {
         // Usable backends that can serve as a separate event voice: the
         // controllable software voices (SAPI, OneCore, ...) other than the
         // main voice -- screen readers are excluded because they cannot be
-        // driven independently. In registry order.
+        // driven independently. Clipboard and No Speech take rate and voice
+        // calls but say nothing, so they are left out. In registry order.
         let (Some(ctx), Some(main)) = (&self.ctx, &self.backend) else {
             return Vec::new();
         };
@@ -455,7 +457,7 @@ impl SpeechSink for Speech {
                 continue;
             };
             let name = backend.name();
-            if name == main_name || !usable(backend.as_ref()) {
+            if name == main_name || never_automatic(&name) || !usable(backend.as_ref()) {
                 continue;
             }
             let features = backend.features();

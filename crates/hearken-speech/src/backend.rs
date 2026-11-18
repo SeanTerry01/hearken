@@ -496,8 +496,9 @@ const CLIPBOARD_BACKEND: &str = "Clipboard";
 /// Prism's registry name for its silent backend.
 const NO_SPEECH_BACKEND: &str = "No Speech";
 
-/// Backends the automatic pick never chooses; each still works when named.
-fn never_automatic(name: &str) -> bool {
+/// Backends the automatic pick never chooses, and never offered as an event
+/// voice; each still works when named.
+pub(crate) fn never_automatic(name: &str) -> bool {
     name == CLIPBOARD_BACKEND || name == NO_SPEECH_BACKEND
 }
 

@@ -461,6 +461,24 @@ fn test_event_backend_options_lists_software_voices_by_priority() {
 }
 
 #[test]
+fn test_event_backend_options_leave_out_the_silent_backends() {
+    // Prism 0.1.6's No Speech and Clipboard accept rate and voice calls, so
+    // they looked like software voices. Offered, a saved event voice that is
+    // not on the machine fell back to No Speech and every road line went
+    // silent.
+    let ctx = FakeRegistry::new(vec![
+        FakeVoice::new("Speech Dispatcher", 97, runtime(false)),
+        FakeVoice::new("Clipboard", 0, ADJUSTABLE),
+        FakeVoice::new("No Speech", 0, ADJUSTABLE),
+        FakeVoice::new("Genny", BUILTIN_PRIORITY, ADJUSTABLE),
+    ]);
+    let mut s = speech_on(&ctx, "Genny");
+    assert!(s.event_backend_options().is_empty());
+    s.select_event_backend(Some("SAPI"));
+    assert!(!s.has_separate_event_voice());
+}
+
+#[test]
 fn test_select_event_backend_switches_and_clears() {
     let ctx = multi_voice_ctx();
     let mut s = speech_on(&ctx, "NVDA");
