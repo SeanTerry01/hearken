@@ -1119,38 +1119,24 @@ fn a_chosen_voice_that_cannot_speak_warns_once_per_change() {
 }
 
 #[test]
-fn probes_do_not_repeat_an_event_selection_that_cannot_succeed() {
+fn an_unavailable_event_voice_is_logged_once_and_retried_each_probe() {
     // Only the built-in voice speaks; the saved event voice, SAPI, is
-    // registered but cannot. Nothing changes between probes, so the
-    // selection must not run again on each one.
+    // registered but cannot. The built-in voice is the player's main voice,
+    // so SAPI recovering later cannot take that over.
     let ctx = FakeRegistry::new(vec![
         FakeVoice::new("SAPI", 97, runtime(false)),
         FakeVoice::new("Genny", BUILTIN_PRIORITY, ADJUSTABLE),
     ]);
-    let genny = ctx.voice("Genny").unwrap().clone();
     let sapi = ctx.voice("SAPI").unwrap().clone();
     let logged = capture_log();
     let mut s = Speech::with_registry(Box::new(ctx), None);
-    // The built-in voice is the player's main voice, so SAPI recovering
-    // later cannot take it over.
     s.select_main_backend(Some("Genny"));
-    assert_eq!(s.backend_name(), "Genny");
     s.select_event_backend(Some("SAPI"));
     assert!(!s.has_separate_event_voice());
-    // A probe is one main voice pick: one acquire of the chosen voice.
-    let per_probe = |s: &mut Speech| {
-        let before = (genny.acquire_calls(), sapi.acquire_calls());
-        s.poll(REFRESH_INTERVAL_S);
-        (
-            genny.acquire_calls() - before.0,
-            sapi.acquire_calls() - before.1,
-        )
-    };
     for _ in 0..4 {
-        assert_eq!(per_probe(&mut s), (1, 0));
+        s.poll(REFRESH_INTERVAL_S);
     }
-    // Another settings change asking for the same voice runs the selection
-    // but does not log it again.
+    // A settings change asking for the same voice is not logged again.
     s.select_event_backend(Some("SAPI"));
     let lines = logged();
     let unavailable = "Event speech backend SAPI not available; events use the main voice";
@@ -1159,14 +1145,22 @@ fn probes_do_not_repeat_an_event_selection_that_cannot_succeed() {
         1,
         "{lines:?}"
     );
-    // SAPI recovers. Probes still leave it alone; the window regaining
-    // focus tries again and binds it.
+    // SAPI recovers: bound at the next probe, with no focus change.
     sapi.set_runtime_supported(true);
-    assert_eq!(per_probe(&mut s), (1, 0));
-    assert!(!s.has_separate_event_voice());
-    s.request_refresh();
-    s.poll(0.016);
+    s.poll(REFRESH_INTERVAL_S);
     assert_eq!(s.event_backend_name(), "SAPI");
+    // Lost again: logged once more, not once per probe.
+    sapi.set_runtime_supported(false);
+    s.select_event_backend(Some("SAPI"));
+    for _ in 0..3 {
+        s.poll(REFRESH_INTERVAL_S);
+    }
+    let lines = logged();
+    assert_eq!(
+        lines.iter().filter(|line| *line == unavailable).count(),
+        1,
+        "{lines:?}"
+    );
 }
 
 #[test]

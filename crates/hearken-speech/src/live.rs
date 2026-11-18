@@ -61,12 +61,9 @@ pub struct Speech {
     /// probe warns when that changes rather than every 3 seconds.
     main_miss: Option<(String, PreferenceMiss)>,
     event_pref: Option<String>,
-    /// The event voice last asked for that could not be bound with the
-    /// current main voice. Probes leave it alone until something changes:
-    /// the main voice, the preference, or the window regaining focus.
+    /// The event voice last asked for that could not be bound, so its
+    /// unavailability is logged once rather than at every probe's retry.
     event_unavailable: Option<String>,
-    /// Retry an unavailable event voice at the next probe (focus regained).
-    event_retry: bool,
     config: SpeechConfig,
     /// Settings > Speech, "Output: braille only". Kept on the object rather
     /// than the backend so it survives a backend swap the way `config` does.
@@ -166,7 +163,6 @@ impl Speech {
             main_miss: None,
             event_pref: None,
             event_unavailable: None,
-            event_retry: false,
             config: SpeechConfig::default(),
             braille_only: false,
             refresh_timer: 0.0,
@@ -219,7 +215,6 @@ impl Speech {
             main_miss: None,
             event_pref: None,
             event_unavailable: None,
-            event_retry: false,
             config: SpeechConfig::default(),
             braille_only: false,
             refresh_timer: 0.0,
@@ -543,7 +538,6 @@ impl SpeechSink for Speech {
             Some(name) if name != main_name => self.event_backend_options(),
             _ => Vec::new(),
         };
-        self.event_retry = false;
         let EventVoiceChoice::Separate(name) = event_voice_choice(name, &main_name, &options)
         else {
             self.event_backend = None;
@@ -712,13 +706,12 @@ impl SpeechSink for Speech {
             // Same main voice as before; just make sure the event voice is
             // alive too (it can die independently, e.g. a SAPI hiccup).
             // A preference naming the main voice shares it on purpose, so
-            // there is nothing to re-select on every probe. Neither is there
-            // when the last try found the event voice unavailable: that
-            // waits for a change (or the window regaining focus) instead of
-            // enumerating every backend each probe.
+            // there is nothing to re-select on every probe. An event voice
+            // that could not be bound is retried each probe: a built-in
+            // voice whose device is still opening, or a SAPI hiccup, comes
+            // back within one probe.
             let shares_main = self.event_pref.as_deref() == Some(new_name.as_str());
-            let retry = self.event_unavailable.is_none() || self.event_retry;
-            if self.event_pref.is_some() && self.event_backend.is_none() && !shares_main && retry {
+            if self.event_pref.is_some() && self.event_backend.is_none() && !shares_main {
                 let pref = self.event_pref.clone();
                 self.select_event_backend(pref.as_deref());
                 if self.event_backend.is_some() && !self.config.is_empty() {
@@ -755,10 +748,8 @@ impl SpeechSink for Speech {
     fn request_refresh(&mut self) {
         // Called when the game window regains focus: switching screen readers
         // happens outside the game, so that is the moment a change most
-        // likely just occurred. An event voice found unavailable gets one
-        // more try at that probe too.
+        // likely just occurred.
         self.refresh_timer = REFRESH_INTERVAL_S;
-        self.event_retry = true;
     }
 
     fn set_braille_only(&mut self, on: bool) {
